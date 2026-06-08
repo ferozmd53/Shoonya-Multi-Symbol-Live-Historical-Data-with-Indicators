@@ -4,8 +4,8 @@
 ## Installation  and CODE
 
 ```bash
-pip uninstall shoonya-bb-trader -y
-pip install git+https://github.com/ferozmd53/shoonya-bb-trader.git
+pip uninstall Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators -y
+pip install git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git
 
 # run.py - Minimal CODE
 from get_auth import get_auth_code
