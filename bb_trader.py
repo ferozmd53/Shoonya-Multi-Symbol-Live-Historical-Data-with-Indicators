@@ -134,22 +134,22 @@ def Shoonya_login():
 
         api = ShoonyaApiPy()
         
-        login_sheet = excel_name.sheets['LOGIN']
-        
-        # CORRECTED: Read from correct cells
-        userid = login_sheet.range('B3').value      # USER_ID
-        api_secret = login_sheet.range('B6').value  # SECRET_CODE
-        auth_code = login_sheet.range('B7').value   # AUTH_CODE
-        
-        if userid:
-            userid = str(userid).strip()
-        if api_secret:
-            api_secret = str(api_secret).strip()
-        if auth_code:
-            auth_code = str(auth_code).strip()
-        
-        print(f"User ID: {userid}")
-        print(f"Auth Code: {auth_code[:20]}...")
+        try:
+            login_sheet = excel_name.sheets['LOGIN']
+            userid = login_sheet.range('B2').value
+            api_secret = login_sheet.range('B6').value
+            auth_code = login_sheet.range('B7').value
+            
+            if userid:
+                userid = str(userid).strip()
+            if api_secret:
+                api_secret = str(api_secret).strip()
+            if auth_code:
+                auth_code = str(auth_code).strip()
+        except:
+            userid = "FA78603"
+            api_secret = "YNZZcDn6oEMKoooJy1kdZQDnmMNbREXn0FBfCIroxRpmCe3Xfmi1PlQIBDer3Mnf"
+            auth_code = "aef096d9-a36a-4817-979a-704e104b7c9f"
         
         cred = {'client_id': f'{userid}_U', 'secret': api_secret, 'uid': userid}
         result = api.getAccessToken(auth_code, api_secret, cred['client_id'], userid)
@@ -159,12 +159,9 @@ def Shoonya_login():
             api.injectOAuthHeader(acc_tok, userid, actid)
             print("✅ Login Successful!")
             return 1
-        else:
-            print("❌ Login result is None")
-            return 0
     except Exception as e:
         print(f"Login error: {e}")
-        return 0
+    return 0
 
 # ============================================
 # GET TOKEN
