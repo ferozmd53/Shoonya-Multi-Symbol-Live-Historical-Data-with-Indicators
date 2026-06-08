@@ -1,6 +1,7 @@
-# Shoonya REAL TIME ALL HISTORICAL DATA WITH TICK WITH Bollinger Bands Trading System
+# Shoonya REAL TIME MULTI SYMBOLS  HISTORICAL DATA WITH 
+# TICK WITH Bollinger Bands Trading System
 
-## Installation
+## Installation  and CODE
 
 ```bash
 pip uninstall shoonya-bb-trader -y
