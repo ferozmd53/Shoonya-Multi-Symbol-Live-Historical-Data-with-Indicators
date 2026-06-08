@@ -9,13 +9,7 @@ setup(
     long_description="Real-time Bollinger Bands trading system with Excel integration",
     long_description_content_type="text/markdown",
     url="https://github.com/ferozmd53/shoonya-bb-trader",
-    packages=find_packages(),
-    py_modules=["bb_trader", "get_auth"],
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
-    ],
-    python_requires=">=3.8",
+    py_modules=["bb_trader", "get_auth"],  # This is key - includes your scripts
     install_requires=[
         "NorenRestApiPy>=0.0.22",
         "xlwings>=0.30.0",
@@ -32,4 +26,9 @@ setup(
             "bb-auth=get_auth:get_auth_code",
         ],
     },
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: MIT License",
+    ],
+    python_requires=">=3.8",
 )
