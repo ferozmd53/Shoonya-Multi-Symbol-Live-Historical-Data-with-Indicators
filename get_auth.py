@@ -27,7 +27,7 @@ def get_auth_code():
         response = requests.get('https://api.ipify.org', timeout=5)
         ip = response.text
         print(f"Your IP: {ip}")
-        ws.range("C11").value = ip
+        ws.range("B11").value = ip
         wb.save()
     except:
         pass
