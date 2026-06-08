@@ -15,7 +15,8 @@ CLIENT_ID = ws.range("B2").value      # FA78603_U
 USER_ID = ws.range("B3").value        # FA78603
 PASSWORD = ws.range("B4").value       # your password
 TOTP_SECRET = ws.range("B5").value    # your 32-char secret
-SECRET_CODE = ws.range("B6").value    # your secret code
+SECRET_CODE = ws.range("B6").value  
+IP_ADRESS = ws.range("C11").value  # your secret code
 
 # Check if credentials exist
 if not CLIENT_ID or not USER_ID or not PASSWORD or not TOTP_SECRET:
