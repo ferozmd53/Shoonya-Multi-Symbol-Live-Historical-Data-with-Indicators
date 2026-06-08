@@ -1,8 +1,7 @@
-# Create new .gitignore without ignoring excel files
-echo "__pycache__/" > .gitignore
-echo "*.pyc" >> .gitignore
-echo "*.egg-info/" >> .gitignore
-echo "dist/" >> .gitignore
-echo "build/" >> .gitignore
-echo ".vscode/" >> .gitignore
-echo ".idea/" >> .gitignore
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.vscode/
+.idea/
