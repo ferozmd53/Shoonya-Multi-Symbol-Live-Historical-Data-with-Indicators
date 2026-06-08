@@ -136,7 +136,7 @@ def Shoonya_login():
         
         try:
             login_sheet = excel_name.sheets['LOGIN']
-            userid = login_sheet.range('B2').value
+            userid = login_sheet.range('B3').value
             api_secret = login_sheet.range('B6').value
             auth_code = login_sheet.range('B7').value
             
