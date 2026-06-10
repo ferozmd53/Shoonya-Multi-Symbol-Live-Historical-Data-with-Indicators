@@ -2,4 +2,13 @@
 
 ## Installation
 ```bash
+pip uninstall Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators -y
 pip install git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git
+
+# run.py - Minimal code
+from get_auth import get_auth_code
+from Extreme_Reversal_Signal import main
+
+if __name__ == "__main__":
+    get_auth_code()
+    main()
