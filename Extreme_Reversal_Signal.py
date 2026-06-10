@@ -1,4 +1,33 @@
-## main_script.py - FIXED HISTORICAL SIGNALS
+# Extreme_Reversal_Signal.py - StochRSI Version
+"""
+SHOONYA TICK REAL TIME with MULTI SYMBOLS HISTORICAL DATA
+STOCHASTIC RSI + BOLLINGER BANDS TRADING SYSTEM
+====================================================================
+DISCLAIMER
+====================================================================
+This software is for educational and research purposes only.
+
+RISK WARNING:
+- Trading in financial markets involves substantial risk of loss
+- Past performance does not guarantee future results
+- This system generates trading signals based on technical indicators
+- You should consult with a qualified financial advisor
+- Use this software at your own risk
+
+====================================================================
+INSTALLATION:
+pip uninstall Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators -y
+pip install git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git
+
+USAGE:
+from get_auth import get_auth_code
+from Extreme_Reversal_Signal import main
+
+get_auth_code()
+main()
+====================================================================
+"""
+
 from NorenRestApiPy.NorenApi import NorenApi
 import time
 import datetime
@@ -10,9 +39,9 @@ import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
 
-# ============================================
+# ====================================================================
 # GLOBAL VARIABLES
-# ============================================
+# ====================================================================
 
 excel_name = xw.Book('symbols.xlsx')
 api = None
@@ -25,25 +54,30 @@ tick_count = 0
 last_symbol_check = 0
 last_excel_update = 0
 
-# ============================================
+# ====================================================================
 # CONFIGURATION
-# ============================================
+# ====================================================================
 
 class Config:
+    # Bollinger Bands Parameters
     MA_LENGTH = 20
     STD_UP = 2.0
     STD_DOWN = 2.0
+    
+    # StochRSI Parameters
     RSI_LENGTH = 14
     STO_LENGTH = 14
     STO_UPPER = 70
     STO_LOWER = 30
-    EXCEL_UPDATE_INTERVAL = 0.1
-    LOAD_DAYS = 500
-    KEEP_DAYS = 100
+    
+    # Performance Settings
+    EXCEL_UPDATE_INTERVAL = 1
+    LOAD_DAYS = 500      # Days for RMA stabilization
+    KEEP_DAYS = 100      # Days kept in memory
 
-# ============================================
+# ====================================================================
 # API CLASS
-# ============================================
+# ====================================================================
 
 class ShoonyaApiPy(NorenApi):
     def __init__(self):
@@ -52,40 +86,42 @@ class ShoonyaApiPy(NorenApi):
             websocket='wss://api.shoonya.com/NorenWSAPI/'
         )
 
-# ============================================
-# EXACT TRADINGVIEW RMA (Wilder's Moving Average)
-# ============================================
+# ====================================================================
+# TRADINGVIEW EXACT INDICATORS
+# ====================================================================
 
 def ta_rma(src, length):
+    """Wilder's Moving Average (used by TradingView ta.rsi)"""
     alpha = 1.0 / length
     return src.ewm(alpha=alpha, adjust=False).mean()
 
-# ============================================
-# FAST INDICATOR WITH PROPER INITIALIZATION
-# ============================================
+# ====================================================================
+# FAST STOCHRSI INDICATOR CLASS
+# ====================================================================
 
-class FastIndicator:
+class StochRSIIndicator:
+    """Fast incremental StochRSI calculator - TradingView exact match"""
+    
     def __init__(self, symbol, all_closes, all_highs, all_lows):
         self.symbol = symbol
-        
         self.all_closes = list(all_closes) if all_closes else []
-        self.all_highs = list(all_highs) if all_highs else []
-        self.all_lows = list(all_lows) if all_lows else []
         
+        # Keep only last KEEP_DAYS for live updates
         self.closes = self.all_closes[-Config.KEEP_DAYS:] if len(self.all_closes) > Config.KEEP_DAYS else self.all_closes.copy()
-        self.highs = self.all_highs[-Config.KEEP_DAYS:] if len(self.all_highs) > Config.KEEP_DAYS else self.all_highs.copy()
-        self.lows = self.all_lows[-Config.KEEP_DAYS:] if len(self.all_lows) > Config.KEEP_DAYS else self.all_lows.copy()
         
+        # RSI state
         self.avg_gain = 0
         self.avg_loss = 0
         self.rsi_series = []
         self.stoch_series = []
         
+        # Previous values for signals
         self.prev_close = None
         self.prev_bb_lower = 0
         self.prev_bb_upper = 0
         self.prev_stoch = 50
         
+        # Current values
         self.current_rsi = 50
         self.current_stoch = 50
         self.current_sma_stoch = 50
@@ -97,6 +133,7 @@ class FastIndicator:
             self._initialize_indicators()
     
     def _initialize_indicators(self):
+        """Initialize with 500 days of data for RMA stabilization"""
         df = pd.DataFrame({'close': self.all_closes})
         delta = df['close'].diff()
         u = delta.where(delta > 0, 0.0)
@@ -116,6 +153,7 @@ class FastIndicator:
         self.avg_gain = avg_gain.iloc[-1] if not pd.isna(avg_gain.iloc[-1]) else 0
         self.avg_loss = avg_loss.iloc[-1] if not pd.isna(avg_loss.iloc[-1]) else 0
         
+        # Calculate StochRSI from full RSI series
         if len(rsi_values) >= Config.STO_LENGTH:
             rsi_array = np.array(rsi_values)
             stoch_values = []
@@ -140,6 +178,7 @@ class FastIndicator:
                 if len(self.stoch_series) >= 2:
                     self.prev_stoch = self.stoch_series[-2]
         
+        # Bollinger Bands
         recent_closes = self.closes[-Config.MA_LENGTH:]
         self.current_bb_middle = sum(recent_closes) / Config.MA_LENGTH
         variance = sum((x - self.current_bb_middle) ** 2 for x in recent_closes) / Config.MA_LENGTH
@@ -147,6 +186,7 @@ class FastIndicator:
         self.current_bb_upper = self.current_bb_middle + (Config.STD_UP * std)
         self.current_bb_lower = self.current_bb_middle - (Config.STD_DOWN * std)
         
+        # Previous BB values for signals
         if len(self.closes) >= Config.MA_LENGTH + 1:
             prev_closes = self.closes[-Config.MA_LENGTH-1:-1]
             prev_middle = sum(prev_closes) / Config.MA_LENGTH
@@ -158,6 +198,7 @@ class FastIndicator:
         print(f"   ✅ {self.symbol}: RSI={self.current_rsi:.1f}, Stoch={self.current_stoch:.1f}")
     
     def _update_rsi_wilder(self, new_price):
+        """Update RSI using Wilder's method (O(1) per tick)"""
         if self.prev_close is None:
             return self.current_rsi
         
@@ -170,14 +211,12 @@ class FastIndicator:
         self.avg_loss = self.avg_loss * (1 - alpha) + loss * alpha
         
         if self.avg_loss == 0:
-            rsi = 100
-        else:
-            rs = self.avg_gain / self.avg_loss
-            rsi = 100 - (100 / (1 + rs))
-        
-        return rsi
+            return 100
+        rs = self.avg_gain / self.avg_loss
+        return 100 - (100 / (1 + rs))
     
     def _update_stoch(self, rsi):
+        """Update StochRSI (O(14) per tick)"""
         self.rsi_series.append(rsi)
         if len(self.rsi_series) > Config.KEEP_DAYS:
             self.rsi_series = self.rsi_series[-Config.KEEP_DAYS:]
@@ -206,6 +245,7 @@ class FastIndicator:
         return 50
     
     def _update_bb(self, new_price):
+        """Update Bollinger Bands (O(20) per tick)"""
         self.prev_bb_lower = self.current_bb_lower
         self.prev_bb_upper = self.current_bb_upper
         
@@ -222,6 +262,7 @@ class FastIndicator:
             self.current_bb_lower = self.current_bb_middle - (Config.STD_DOWN * std)
     
     def add_tick(self, ltp):
+        """Process one tick and return all indicators"""
         if len(self.closes) == 0:
             self.closes.append(ltp)
             self.prev_close = ltp
@@ -229,13 +270,13 @@ class FastIndicator:
         
         self.prev_close = self.closes[-1]
         
+        # Update all indicators
         rsi = self._update_rsi_wilder(ltp)
         self.current_rsi = rsi
-        
         self._update_stoch(rsi)
-        
         self._update_bb(ltp)
         
+        # Generate signals
         buy_signal = False
         sell_signal = False
         signal = ""
@@ -267,9 +308,9 @@ class FastIndicator:
             'signal': signal
         }
 
-# ============================================
-# SAFE CONVERSION
-# ============================================
+# ====================================================================
+# UTILITY FUNCTIONS
+# ====================================================================
 
 def safe_float(value, default=0):
     if value is None:
@@ -295,9 +336,9 @@ def safe_int(value, default=0):
             return default
     return default
 
-# ============================================
-# LOGIN
-# ============================================
+# ====================================================================
+# SHOONYA API FUNCTIONS
+# ====================================================================
 
 def Shoonya_login():
     global api
@@ -311,7 +352,7 @@ def Shoonya_login():
             auth = login_sheet.range('B7').value
             
             if not userid or not secret or not auth:
-                print("❌ Missing credentials!")
+                print("❌ Missing credentials in LOGIN sheet!")
                 return 0
                 
             userid = str(userid).strip()
@@ -327,6 +368,10 @@ def Shoonya_login():
         
         if result:
             acc_tok, usrid, ref_tok, actid = result
+            login_sheet = excel_name.sheets['LOGIN']
+            login_sheet.range('B9').value = acc_tok       
+            login_sheet.range('B10').value = ref_tok
+            print("✅ TOKEN")
             api.injectOAuthHeader(acc_tok, userid, actid)
             print("✅ Login Successful!")
             return 1
@@ -336,10 +381,6 @@ def Shoonya_login():
     except Exception as e:
         print(f"Login error: {e}")
     return 0
-
-# ============================================
-# GET TOKEN
-# ============================================
 
 def GetToken(exchange, tradingsymbol):
     try:
@@ -355,11 +396,8 @@ def GetToken(exchange, tradingsymbol):
         print(f"Token error: {e}")
     return None
 
-# ============================================
-# FETCH HISTORICAL DATA WITH SIGNALS
-# ============================================
-
 def fetch_historical_data(symbol):
+    """Fetch historical data from Shoonya API"""
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=Config.LOAD_DAYS)
@@ -403,7 +441,7 @@ def fetch_historical_data(symbol):
         if len(df) < Config.MA_LENGTH:
             return None
         
-        # Calculate ALL indicators including signals
+        # Calculate indicators for display
         df_calc = df.copy()
         
         # RSI
@@ -429,7 +467,7 @@ def fetch_historical_data(symbol):
         df_calc['BB_UPPER'] = df_calc['BB_MIDDLE'] + (Config.STD_UP * std)
         df_calc['BB_LOWER'] = df_calc['BB_MIDDLE'] - (Config.STD_DOWN * std)
         
-        # BUY/SELL Signals (using shift for proper signal generation)
+        # Signals
         df_calc['BUY_SIGNAL'] = (
             (df_calc['close'].shift(1) < df_calc['BB_LOWER'].shift(1)) &
             (df_calc['close'] > df_calc['BB_LOWER']) &
@@ -442,14 +480,7 @@ def fetch_historical_data(symbol):
             (df_calc['SMA_STOCH'].shift(1) > Config.STO_UPPER)
         )
         
-        # Get yesterday's data (last row)
         yesterday = df_calc.iloc[-1]
-        
-        # Calculate buy/sell for historical display (from yesterday's signals)
-        buy_value = 1 if yesterday['BUY_SIGNAL'] else ''
-        sell_value = 1 if yesterday['SELL_SIGNAL'] else ''
-        signal_value = 'BUY' if yesterday['BUY_SIGNAL'] else ('SELL' if yesterday['SELL_SIGNAL'] else '')
-        
         yesterday_data = {
             'date': yesterday['datetime'].strftime('%d/%m/%Y'),
             'open': yesterday['open'],
@@ -463,15 +494,12 @@ def fetch_historical_data(symbol):
             'rsi': round(yesterday['RSI'], 2),
             'stoch_rsi': round(yesterday['STOCH_RSI'], 2),
             'sma_stoch': round(yesterday['SMA_STOCH'], 2),
-            'buy': buy_value,
-            'sell': sell_value,
-            'signal': signal_value
+            'buy': 1 if yesterday['BUY_SIGNAL'] else '',
+            'sell': 1 if yesterday['SELL_SIGNAL'] else '',
+            'signal': 'BUY' if yesterday['BUY_SIGNAL'] else ('SELL' if yesterday['SELL_SIGNAL'] else '')
         }
         
-        # Also calculate 2 days ago for debugging (optional)
-        if len(df_calc) >= 2:
-            day_before = df_calc.iloc[-2]
-            print(f"   📊 {symbol}: Yesterday RSI={yesterday_data['rsi']}, Stoch={yesterday_data['stoch_rsi']}, Buy={buy_value}, Sell={sell_value}")
+        print(f"   📊 {symbol}: Loaded {len(df)} days, RSI={yesterday_data['rsi']}")
         
         return {
             'all_closes': df['close'].tolist(),
@@ -484,9 +512,9 @@ def fetch_historical_data(symbol):
         print(f"Error: {e}")
         return None
 
-# ============================================
+# ====================================================================
 # WEBSOCKET CALLBACKS
-# ============================================
+# ====================================================================
 
 def on_ticks(tick):
     global live_data, tick_count
@@ -565,75 +593,65 @@ def subscribe_symbols(tokens_list):
             print(f"Subscribe error: {e}")
         time.sleep(0.1)
 
-# ============================================
-# CHECK NEW SYMBOLS
-# ============================================
+# ====================================================================
+# EXCEL FUNCTIONS
+# ====================================================================
 
-def check_new_symbols():
-    global last_symbol_check
-    
+def setup_excel_headers():
     try:
         ws = excel_name.sheets['symbols']
-        symbols_data = ws.range("A2:A100").value
-        current = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
+        ws.range("1:1").clear_contents()
+        
+        headers = [
+            'Symbol', 'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
+            'RSI', 'StochRSI', 'SMA Stoch', 'BB Upper', 'BB Middle', 'BB Lower',
+            'BUY', 'SELL', 'Signal', 'Last Update',
+            'Date', 'Open', 'High', 'Low', 'Close', 'Volume',
+            'RSI', 'StochRSI', 'SMA Stoch', 'BB Upper', 'BB Middle', 'BB Lower',
+            'BUY', 'SELL', 'Signal'
+        ]
+        
+        for col_idx, header in enumerate(headers, start=1):
+            cell = ws.range((1, col_idx))
+            cell.value = header
+            
+            if header in ['BUY', 'SELL', 'Signal']:
+                cell.color = (255, 100, 100)
+            elif col_idx >= 18:
+                cell.color = (146, 96, 54)
+            else:
+                cell.color = (54, 96, 146)
+            cell.font.color = (255, 255, 255)
+            cell.font.bold = True
+        
+        ws.range('A:AF').column_width = 12
+        ws.range('A:A').column_width = 20
+
+        return True
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
+
+def read_symbols_from_excel():
+    try:
+        ws = excel_name.sheets['symbols']
+        symbols_data = ws.range("A2:A200").value
+        symbols = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
         
         cleaned = []
-        for s in current:
+        seen = set()
+        for s in symbols:
             s_str = s.upper()
             if s_str.startswith('NSE:'):
                 s_str = s_str[4:]
             if not s_str.endswith('-EQ'):
                 s_str = f"{s_str}-EQ"
-            cleaned.append(s_str)
-        
-        new_symbols = [s for s in cleaned if s not in symbol_tokens]
-        
-        if new_symbols:
-            print(f"\n🆕 Found {len(new_symbols)} new symbols")
-            new_tokens = []
-            for symbol in new_symbols:
-                try:
-                    token = GetToken("NSE", symbol)
-                    if token:
-                        tk = f"NSE|{token}"
-                        symbol_tokens[symbol] = tk
-                        token_symbols[token] = symbol
-                        
-                        hist_data = fetch_historical_data(symbol)
-                        
-                        live_data[tk] = {
-                            'symbol': symbol,
-                            'first_tick': True,
-                            'indicator': FastIndicator(symbol, 
-                                                       hist_data['all_closes'] if hist_data else [],
-                                                       hist_data['all_highs'] if hist_data else [],
-                                                       hist_data['all_lows'] if hist_data else []),
-                            'ltp': 0, 'volume': 0,
-                            'open': 0, 'high': 0, 'low': 0, 'close': 0,
-                            'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
-                            'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
-                            'buy': '', 'sell': '', 'signal': '',
-                            'timestamp': None
-                        }
-                        new_tokens.append(tk)
-                        
-                        if hist_data:
-                            historical_data_cache[symbol] = hist_data['yesterday']
-                        
-                        print(f"   ✓ Added {symbol}")
-                except Exception as e:
-                    print(f"   Error adding {symbol}: {e}")
-                time.sleep(0.05)
-            
-            if new_tokens and feed_opened:
-                subscribe_symbols(new_tokens)
-                print(f"✓ Subscribed to {len(new_tokens)} new symbols\n")
-    except Exception as e:
-        pass
-
-# ============================================
-# UPDATE EXCEL
-# ============================================
+            if s_str not in seen:
+                seen.add(s_str)
+                cleaned.append(s_str)
+        return cleaned
+    except Exception:
+        return []
 
 def update_excel_bulk():
     global last_excel_update
@@ -715,73 +733,67 @@ def update_excel_bulk():
     except Exception:
         pass
 
-# ============================================
-# SETUP HEADERS
-# ============================================
-
-def setup_excel_headers():
+def check_new_symbols():
+    global last_symbol_check
+    
     try:
         ws = excel_name.sheets['symbols']
-        ws.range("1:1").clear_contents()
-        
-        headers = [
-            'Symbol', 'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
-            'RSI', 'StochRSI', 'SMA Stoch', 'BB Upper', 'BB Middle', 'BB Lower',
-            'BUY', 'SELL', 'Signal', 'Last Update',
-            'Date', 'Open', 'High', 'Low', 'Close', 'Volume',
-            'RSI', 'StochRSI', 'SMA Stoch', 'BB Upper', 'BB Middle', 'BB Lower',
-            'BUY', 'SELL', 'Signal'
-        ]
-        
-        for col_idx, header in enumerate(headers, start=1):
-            cell = ws.range((1, col_idx))
-            cell.value = header
-            
-            if header in ['BUY', 'SELL', 'Signal']:
-                cell.color = (255, 100, 100)
-            elif col_idx >= 18:
-                cell.color = (146, 96, 54)
-            else:
-                cell.color = (54, 96, 146)
-            cell.font.color = (255, 255, 255)
-            cell.font.bold = True
-        
-        ws.range('A:AF').column_width = 12
-        ws.range('A:A').column_width = 20
-
-        return True
-    except Exception as e:
-        print(f"Error: {e}")
-        return False
-
-# ============================================
-# READ SYMBOLS
-# ============================================
-
-def read_symbols_from_excel():
-    try:
-        ws = excel_name.sheets['symbols']
-        symbols_data = ws.range("A2:A200").value
-        symbols = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
+        symbols_data = ws.range("A2:A100").value
+        current = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
         
         cleaned = []
-        seen = set()
-        for s in symbols:
+        for s in current:
             s_str = s.upper()
             if s_str.startswith('NSE:'):
                 s_str = s_str[4:]
             if not s_str.endswith('-EQ'):
                 s_str = f"{s_str}-EQ"
-            if s_str not in seen:
-                seen.add(s_str)
-                cleaned.append(s_str)
-        return cleaned
-    except Exception:
-        return []
-
-# ============================================
-# MAIN EXCEL LOOP
-# ============================================
+            cleaned.append(s_str)
+        
+        new_symbols = [s for s in cleaned if s not in symbol_tokens]
+        
+        if new_symbols:
+            print(f"\n🆕 Found {len(new_symbols)} new symbols")
+            new_tokens = []
+            for symbol in new_symbols:
+                try:
+                    token = GetToken("NSE", symbol)
+                    if token:
+                        tk = f"NSE|{token}"
+                        symbol_tokens[symbol] = tk
+                        token_symbols[token] = symbol
+                        
+                        hist_data = fetch_historical_data(symbol)
+                        
+                        live_data[tk] = {
+                            'symbol': symbol,
+                            'first_tick': True,
+                            'indicator': StochRSIIndicator(symbol, 
+                                                           hist_data['all_closes'] if hist_data else [],
+                                                           hist_data['all_highs'] if hist_data else [],
+                                                           hist_data['all_lows'] if hist_data else []),
+                            'ltp': 0, 'volume': 0,
+                            'open': 0, 'high': 0, 'low': 0, 'close': 0,
+                            'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
+                            'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
+                            'buy': '', 'sell': '', 'signal': '',
+                            'timestamp': None
+                        }
+                        new_tokens.append(tk)
+                        
+                        if hist_data:
+                            historical_data_cache[symbol] = hist_data['yesterday']
+                        
+                        print(f"   ✓ Added {symbol}")
+                except Exception as e:
+                    print(f"   Error adding {symbol}: {e}")
+                time.sleep(0.05)
+            
+            if new_tokens and feed_opened:
+                subscribe_symbols(new_tokens)
+                print(f"✓ Subscribed to {len(new_tokens)} new symbols\n")
+    except Exception as e:
+        pass
 
 def start_excel_loop():
     global last_symbol_check, tick_count
@@ -819,15 +831,15 @@ def start_excel_loop():
         except Exception:
             time.sleep(0.1)
 
-# ============================================
-# MAIN
-# ============================================
+# ====================================================================
+# MAIN FUNCTION
+# ====================================================================
 
 def main():
     global historical_data_cache
     
     print("\n" + "="*80)
-    print("🚀 TRADINGVIEW EXACT MATCH WITH SIGNALS")
+    print("🚀 STOCHRSI TRADING SYSTEM (TradingView Exact Match)")
     print("="*80)
     
     print("\n[1/4] Setting up Excel...")
@@ -835,7 +847,7 @@ def main():
     
     print("\n[2/4] Logging to Shoonya...")
     if not Shoonya_login():
-        print("❌ Login failed!")
+        print("❌ Login failed! Check your LOGIN sheet in Excel.")
         return
     
     print("\n[3/4] Reading symbols...")
@@ -843,6 +855,7 @@ def main():
     
     if not symbols:
         default = ["RELIANCE-EQ", "TCS-EQ", "INFY-EQ"]
+        print(f"⚠️ No symbols found, adding default symbols to column A")
         for i, sym in enumerate(default, start=2):
             excel_name.sheets['symbols'].range(f"A{i}").value = sym
         excel_name.save()
@@ -865,10 +878,10 @@ def main():
             live_data[tk] = {
                 'symbol': symbol,
                 'first_tick': True,
-                'indicator': FastIndicator(symbol, 
-                                           hist_data['all_closes'] if hist_data else [],
-                                           hist_data['all_highs'] if hist_data else [],
-                                           hist_data['all_lows'] if hist_data else []),
+                'indicator': StochRSIIndicator(symbol, 
+                                               hist_data['all_closes'] if hist_data else [],
+                                               hist_data['all_highs'] if hist_data else [],
+                                               hist_data['all_lows'] if hist_data else []),
                 'ltp': 0, 'volume': 0,
                 'open': 0, 'high': 0, 'low': 0, 'close': 0,
                 'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
@@ -911,10 +924,11 @@ def main():
             print("✅ WebSocket connected!")
             if symbol_tokens:
                 subscribe_symbols(list(symbol_tokens.values()))
-            print("\n🚀 Running with FULL signal detection...")
-            print("   ✅ Historical BUY/SELL signals now displayed")
-            print("   ✅ Live signals trigger in real-time")
-            print("   ✅ All indicators match TradingView!\n")
+            print("\n🚀 StochRSI Trading System Running...")
+            print("   ✅ RSI = Wilder's RMA (TradingView exact)")
+            print("   ✅ StochRSI = ta.stoch() on RSI")
+            print("   ✅ BUY/SELL signals active")
+            print("   ✅ Historical data loaded (500 days for stabilization)\n")
             start_excel_loop()
         else:
             print("❌ WebSocket failed!")
