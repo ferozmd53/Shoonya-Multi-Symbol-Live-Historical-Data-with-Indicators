@@ -1,34 +1,33 @@
-# setup.py
 from setuptools import setup, find_packages
 
 setup(
-    name="shoonya-bb-trader",
-    version="1.0.0",
+    name="Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators",
+    version="2.0.0",
     author="ferozmd53",
-    description="Bollinger Bands Trading System for Shoonya API",
-    long_description="Real-time Bollinger Bands trading system with Excel integration",
+    description="Shoonya TICK REAL TIME with MULTI SYMBOLS HISTORICAL DATA - StochRSI Version",
+    long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/ferozmd53/shoonya-bb-trader",
-    py_modules=["bb_trader", "get_auth"],  # This is key - includes your scripts
+    license="MIT",
+    packages=find_packages(),
     install_requires=[
-        "NorenRestApiPy>=0.0.22",
+        "NorenRestApiPy>=1.0.0",
         "xlwings>=0.30.0",
-        "pandas>=2.0.0",
         "numpy>=1.24.0",
-        "selenium>=4.15.0",
-        "webdriver-manager>=4.0.0",
-        "pyotp>=2.9.0",
-        "requests>=2.31.0",
-    ],
-    entry_points={
-        "console_scripts": [
-            "bb-trader=bb_trader:main",
-            "bb-auth=get_auth:get_auth_code",
-        ],
-    },
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
+        "pandas>=2.0.0",
+        "openpyxl>=3.1.0",
     ],
     python_requires=">=3.8",
+    include_package_data=True,
+    package_data={
+        '': ['*.xlsx'],
+    },
+    classifiers=[
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Financial and Insurance Industry",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+    ],
 )
