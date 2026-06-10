@@ -1,22 +1,16 @@
+# Shoonya StochRSI Trading System
 
-# Shoonya REAL TIME TICK with MULTI SYMBOLS  HISTORICAL DATA 
+## SHOONYA TICK REAL TIME with MULTI SYMBOLS HISTORICAL DATA
 
-# ====================================================================
-# DISCLAIMER
-# ====================================================================
-# This software is for educational and research purposes only.
-## Installation  and CODE
+### Features (v2.0)
+- ✅ StochRSI + Bollinger Bands (Reversal Signal)
+- ✅ Exact TradingView indicator calculations
+- ✅ RSI using Wilder's RMA (ta.rsi)
+- ✅ StochRSI using ta.stoch on RSI
+- ✅ BUY: Price crosses above Lower Band + StochRSI < 30
+- ✅ SELL: Price crosses below Upper Band + StochRSI > 70
 
-```bash  C M D
+### Installation
+```bash
 pip uninstall Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators -y
 pip install git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git
-
-# run.py - Minimal CODE
-#excel file download
-from get_auth import get_auth_code
-from Extreme_Reversal_Signal import main
-
-get_auth_code()
-main()
-
-
