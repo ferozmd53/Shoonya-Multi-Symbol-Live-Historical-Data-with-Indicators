@@ -1,4 +1,4 @@
-# main_script.py - FIXED HISTORICAL SIGNALS
+## main_script.py - FIXED HISTORICAL SIGNALS
 from NorenRestApiPy.NorenApi import NorenApi
 import time
 import datetime
