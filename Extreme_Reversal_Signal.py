@@ -1,4 +1,5 @@
-# Extreme_Reversal_Signal.py - COMPLETE WORKING SCRIPT
+# Extreme_Reversal_Signal.py - DAILY TIMEFRAME MATCH TRADINGVIEW
+
 from NorenRestApiPy.NorenApi import NorenApi
 import time
 import datetime
@@ -10,9 +11,9 @@ import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
 
-# ====================================================================
+# ============================================
 # GLOBAL VARIABLES
-# ====================================================================
+# ============================================
 
 excel_name = xw.Book('symbols.xlsx')
 api = None
@@ -24,26 +25,27 @@ historical_data_cache = {}
 tick_count = 0
 last_symbol_check = 0
 last_excel_update = 0
+today_price = {}  # Store today's price for daily close calculation
+last_updated_date = {}
 
-# ====================================================================
+# ============================================
 # CONFIGURATION
-# ====================================================================
+# ============================================
 
 class Config:
-    MA_LENGTH = 20
-    STD_UP = 2.0
-    STD_DOWN = 2.0
+    BB_LENGTH = 20
+    BB_STD = 2.0
     RSI_LENGTH = 14
-    STO_LENGTH = 14
-    STO_UPPER = 70
-    STO_LOWER = 30
-    EXCEL_UPDATE_INTERVAL = 1
+    STOCH_LENGTH = 14
+    STOCH_UPPER = 70
+    STOCH_LOWER = 30
+    EXCEL_UPDATE_INTERVAL = 0.1
     LOAD_DAYS = 500
     KEEP_DAYS = 500
 
-# ====================================================================
+# ============================================
 # API CLASS
-# ====================================================================
+# ============================================
 
 class ShoonyaApiPy(NorenApi):
     def __init__(self):
@@ -52,279 +54,49 @@ class ShoonyaApiPy(NorenApi):
             websocket='wss://api.shoonya.com/NorenWSAPI/'
         )
 
-# ====================================================================
-# FAST LIVE INDICATOR CLASS
-# ====================================================================
+# ============================================
+# EXACT TRADINGVIEW FORMULAS
+# ============================================
 
-class FastLiveIndicator:
-    def __init__(self, symbol, all_closes):
-        self.symbol = symbol
-        self.all_closes = list(all_closes) if all_closes else []
-        self.closes = self.all_closes[-Config.KEEP_DAYS:] if len(self.all_closes) > Config.KEEP_DAYS else self.all_closes.copy()
-        
-        self.avg_gain = 0
-        self.avg_loss = 0
-        self.rsi_series = []
-        self.stoch_series = []
-        
-        self.prev_close = None
-        self.prev_bb_lower = 0
-        self.prev_bb_upper = 0
-        self.prev_stoch = 50
-        
-        self.current_rsi = 50
-        self.current_stoch = 50
-        self.current_sma_stoch = 50
-        self.current_bb_middle = 0
-        self.current_bb_upper = 0
-        self.current_bb_lower = 0
-        
-        if len(self.all_closes) >= Config.MA_LENGTH + Config.RSI_LENGTH:
-            self._initialize_indicators()
-    
-    def _initialize_indicators(self):
-        df = pd.DataFrame({'close': self.all_closes})
-        delta = df['close'].diff()
-        u = delta.where(delta > 0, 0.0)
-        d = -delta.where(delta < 0, 0.0)
-        
-        alpha = 1.0 / Config.RSI_LENGTH
-        avg_gain = u.ewm(alpha=alpha, adjust=False).mean()
-        avg_loss = d.ewm(alpha=alpha, adjust=False).mean()
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        rsi_values = rsi.dropna().tolist()
-        self.rsi_series = rsi_values[-Config.KEEP_DAYS:] if len(rsi_values) > Config.KEEP_DAYS else rsi_values
-        self.current_rsi = self.rsi_series[-1] if self.rsi_series else 50
-        
-        self.avg_gain = avg_gain.iloc[-1] if not pd.isna(avg_gain.iloc[-1]) else 0
-        self.avg_loss = avg_loss.iloc[-1] if not pd.isna(avg_loss.iloc[-1]) else 0
-        
-        if len(rsi_values) >= Config.STO_LENGTH:
-            rsi_array = np.array(rsi_values)
-            stoch_values = []
-            for i in range(Config.STO_LENGTH - 1, len(rsi_array)):
-                window = rsi_array[i - Config.STO_LENGTH + 1:i + 1]
-                lowest_rsi = np.min(window)
-                highest_rsi = np.max(window)
-                if highest_rsi != lowest_rsi:
-                    stoch = 100 * (rsi_array[i] - lowest_rsi) / (highest_rsi - lowest_rsi)
-                else:
-                    stoch = 50
-                stoch_values.append(stoch)
-            
-            self.stoch_series = stoch_values[-Config.KEEP_DAYS:] if len(stoch_values) > Config.KEEP_DAYS else stoch_values
-            self.current_stoch = self.stoch_series[-1] if self.stoch_series else 50
-            if len(self.stoch_series) >= 3:
-                self.current_sma_stoch = sum(self.stoch_series[-3:]) / 3
-                if len(self.stoch_series) >= 2:
-                    self.prev_stoch = self.stoch_series[-2]
-        
-        recent_closes = self.closes[-Config.MA_LENGTH:]
-        self.current_bb_middle = sum(recent_closes) / Config.MA_LENGTH
-        variance = sum((x - self.current_bb_middle) ** 2 for x in recent_closes) / Config.MA_LENGTH
-        std = variance ** 0.5
-        self.current_bb_upper = self.current_bb_middle + (Config.STD_UP * std)
-        self.current_bb_lower = self.current_bb_middle - (Config.STD_DOWN * std)
-        
-        if len(self.closes) >= Config.MA_LENGTH + 1:
-            prev_closes = self.closes[-Config.MA_LENGTH-1:-1]
-            prev_middle = sum(prev_closes) / Config.MA_LENGTH
-            prev_variance = sum((x - prev_middle) ** 2 for x in prev_closes) / Config.MA_LENGTH
-            prev_std = prev_variance ** 0.5
-            self.prev_bb_lower = prev_middle - (Config.STD_DOWN * prev_std)
-            self.prev_bb_upper = prev_middle + (Config.STD_UP * prev_std)
-        
-        print(f"   ✅ {self.symbol}: RSI={self.current_rsi:.1f}, Stoch={self.current_stoch:.1f}")
-    
-    def _update_rsi_wilder(self, new_price):
-        if self.prev_close is None:
-            return self.current_rsi
-        delta = new_price - self.prev_close
-        gain = delta if delta > 0 else 0
-        loss = -delta if delta < 0 else 0
-        alpha = 1.0 / Config.RSI_LENGTH
-        self.avg_gain = self.avg_gain * (1 - alpha) + gain * alpha
-        self.avg_loss = self.avg_loss * (1 - alpha) + loss * alpha
-        if self.avg_loss == 0:
-            return 100
-        rs = self.avg_gain / self.avg_loss
-        return 100 - (100 / (1 + rs))
-    
-    def _update_stoch(self, rsi):
-        self.rsi_series.append(rsi)
-        if len(self.rsi_series) > Config.KEEP_DAYS:
-            self.rsi_series = self.rsi_series[-Config.KEEP_DAYS:]
-        if len(self.rsi_series) >= Config.STO_LENGTH:
-            window = self.rsi_series[-Config.STO_LENGTH:]
-            lowest_rsi = min(window)
-            highest_rsi = max(window)
-            if highest_rsi != lowest_rsi:
-                stoch = 100 * (rsi - lowest_rsi) / (highest_rsi - lowest_rsi)
-            else:
-                stoch = 50
-            self.stoch_series.append(stoch)
-            if len(self.stoch_series) > Config.KEEP_DAYS:
-                self.stoch_series = self.stoch_series[-Config.KEEP_DAYS:]
-            self.current_stoch = stoch
-            if len(self.stoch_series) >= 3:
-                self.prev_stoch = self.current_sma_stoch
-                self.current_sma_stoch = sum(self.stoch_series[-3:]) / 3
-            return stoch
-        return 50
-    
-    def _update_bb(self, new_price):
-        self.prev_bb_lower = self.current_bb_lower
-        self.prev_bb_upper = self.current_bb_upper
-        self.closes.append(new_price)
-        if len(self.closes) > Config.KEEP_DAYS:
-            self.closes = self.closes[-Config.KEEP_DAYS:]
-        if len(self.closes) >= Config.MA_LENGTH:
-            recent_closes = self.closes[-Config.MA_LENGTH:]
-            self.current_bb_middle = sum(recent_closes) / Config.MA_LENGTH
-            variance = sum((x - self.current_bb_middle) ** 2 for x in recent_closes) / Config.MA_LENGTH
-            std = variance ** 0.5
-            self.current_bb_upper = self.current_bb_middle + (Config.STD_UP * std)
-            self.current_bb_lower = self.current_bb_middle - (Config.STD_DOWN * std)
-    
-    def add_tick(self, ltp):
-        if len(self.closes) == 0:
-            self.closes.append(ltp)
-            self.prev_close = ltp
-            return None
-        
-        self.prev_close = self.closes[-1]
-        rsi = self._update_rsi_wilder(ltp)
-        self.current_rsi = rsi
-        self._update_stoch(rsi)
-        self._update_bb(ltp)
-        
-        buy_signal = False
-        sell_signal = False
-        signal = ""
-        
-        if self.prev_bb_lower != 0:
-            if (self.prev_close < self.prev_bb_lower and 
-                ltp > self.current_bb_lower and 
-                self.prev_stoch < Config.STO_LOWER):
-                buy_signal = True
-                signal = "BUY"
-                print(f"🔵 BUY {self.symbol} | Price:{ltp:.2f}")
-            elif (self.prev_close > self.prev_bb_upper and 
-                  ltp < self.current_bb_upper and 
-                  self.prev_stoch > Config.STO_UPPER):
-                sell_signal = True
-                signal = "SELL"
-                print(f"🔴 SELL {self.symbol} | Price:{ltp:.2f}")
-        
-        return {
-            'rsi': round(self.current_rsi, 2),
-            'stoch_rsi': round(self.current_stoch, 2),
-            'sma_stoch': round(self.current_sma_stoch, 2),
-            'bb_upper': round(self.current_bb_upper, 2),
-            'bb_middle': round(self.current_bb_middle, 2),
-            'bb_lower': round(self.current_bb_lower, 2),
-            'buy': 1 if buy_signal else '',
-            'sell': 1 if sell_signal else '',
-            'signal': signal
-        }
+def tradingview_rsi(close, length=14):
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    alpha = 1.0 / length
+    avg_gain = gain.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
+    avg_loss = loss.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
 
-# ====================================================================
-# SAFE CONVERSION FUNCTIONS
-# ====================================================================
+def tradingview_stochrsi(rsi, length=14):
+    lowest_rsi = rsi.rolling(length).min()
+    highest_rsi = rsi.rolling(length).max()
+    stoch = 100 * (rsi - lowest_rsi) / (highest_rsi - lowest_rsi)
+    return stoch.fillna(50)
 
-def safe_float(value, default=0):
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except:
-            return default
-    return default
+def tradingview_bb(close, length=20, std=2.0):
+    sma = close.rolling(length).mean()
+    stdev = close.rolling(length).std(ddof=0)
+    upper = sma + (std * stdev)
+    lower = sma - (std * stdev)
+    return sma, upper, lower
 
-def safe_int(value, default=0):
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(float(value))
-        except:
-            return default
-    return default
-
-# ====================================================================
-# SHOONYA API FUNCTIONS
-# ====================================================================
-
-def Shoonya_login():
-    global api
-    try:     
-        api = ShoonyaApiPy()
-        try:
-            login_sheet = excel_name.sheets['LOGIN']
-            userid = login_sheet.range('B3').value
-            secret = login_sheet.range('B6').value
-            auth = login_sheet.range('B7').value
-            if not userid or not secret or not auth:
-                print("❌ Missing credentials!")
-                return 0
-            userid = str(userid).strip()
-            secret = str(secret).strip()
-            auth = str(auth).strip()
-        except Exception as e:
-            print(f"❌ Error reading LOGIN sheet: {e}")
-            return 0
-        
-        cred = {'client_id': f'{userid}_U', 'secret': secret, 'uid': userid}
-        result = api.getAccessToken(auth, secret, cred['client_id'], userid)
-        if result:
-            acc_tok, usrid, ref_tok, actid = result
-            api.injectOAuthHeader(acc_tok, userid, actid)
-            print("✅ Login Successful!")
-            return 1
-        else:
-            print("❌ Login failed")
-    except Exception as e:
-        print(f"Login error: {e}")
-    return 0
-
-def GetToken(exchange, tradingsymbol):
-    try:
-        search = tradingsymbol.replace('-EQ', '').strip()
-        result = api.searchscrip(exchange=exchange, searchtext=search)
-        if result and result.get('values'):
-            for item in result['values']:
-                tsym = item.get('tsym', '').upper()
-                if tsym in [tradingsymbol.upper(), search.upper()]:
-                    return item.get('token')
-            return result['values'][0].get('token')
-    except Exception as e:
-        print(f"Token error: {e}")
-    return None
-
-# ====================================================================
-# FETCH HISTORICAL DATA WITH FULL INDICATORS
-# ====================================================================
+# ============================================
+# FETCH DAILY HISTORICAL DATA
+# ============================================
 
 def fetch_historical_data(symbol):
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=Config.LOAD_DAYS)
+        
         start_epoch = int(start_date.timestamp())
         end_epoch = int(end_date.timestamp())
         
         ret = api.get_daily_price_series(
-            exchange="NSE", 
-            tradingsymbol=symbol,
-            startdate=str(start_epoch), 
-            enddate=str(end_epoch)
+            exchange="NSE", tradingsymbol=symbol,
+            startdate=str(start_epoch), enddate=str(end_epoch)
         )
         
         if not ret:
@@ -355,49 +127,25 @@ def fetch_historical_data(symbol):
         df = df.sort_values('datetime')
         df = df.dropna().reset_index(drop=True)
         
-        if len(df) < Config.MA_LENGTH:
+        if len(df) < Config.BB_LENGTH:
             return None
         
-        # Calculate ALL indicators for historical display
-        df_calc = df.copy()
+        # Calculate indicators using TradingView formulas
+        df['RSI'] = tradingview_rsi(df['close'], Config.RSI_LENGTH)
+        df['STOCH_RSI'] = tradingview_stochrsi(df['RSI'], Config.STOCH_LENGTH)
+        df['SMA_STOCH'] = df['STOCH_RSI'].rolling(3).mean()
         
-        # RSI
-        delta = df_calc['close'].diff()
-        u = delta.where(delta > 0, 0.0)
-        d = -delta.where(delta < 0, 0.0)
-        alpha = 1.0 / Config.RSI_LENGTH
-        avg_gain = u.ewm(alpha=alpha, adjust=False).mean()
-        avg_loss = d.ewm(alpha=alpha, adjust=False).mean()
-        rs = avg_gain / avg_loss
-        df_calc['RSI'] = 100 - (100 / (1 + rs))
+        bb_middle, bb_upper, bb_lower = tradingview_bb(df['close'], Config.BB_LENGTH, Config.BB_STD)
+        df['BB_MIDDLE'] = bb_middle
+        df['BB_UPPER'] = bb_upper
+        df['BB_LOWER'] = bb_lower
         
-        # StochRSI
-        rsi_low = df_calc['RSI'].rolling(Config.STO_LENGTH).min()
-        rsi_high = df_calc['RSI'].rolling(Config.STO_LENGTH).max()
-        df_calc['STOCH_RSI'] = 100 * (df_calc['RSI'] - rsi_low) / (rsi_high - rsi_low)
-        df_calc['STOCH_RSI'] = df_calc['STOCH_RSI'].fillna(50)
-        df_calc['SMA_STOCH'] = df_calc['STOCH_RSI'].rolling(3).mean()
+        # Get yesterday's data (last row)
+        yesterday = df.iloc[-1]
         
-        # Bollinger Bands
-        df_calc['BB_MIDDLE'] = df_calc['close'].rolling(Config.MA_LENGTH).mean()
-        std = df_calc['close'].rolling(Config.MA_LENGTH).std(ddof=0)
-        df_calc['BB_UPPER'] = df_calc['BB_MIDDLE'] + (Config.STD_UP * std)
-        df_calc['BB_LOWER'] = df_calc['BB_MIDDLE'] - (Config.STD_DOWN * std)
+        # Previous day data for signals
+        day_before = df.iloc[-2] if len(df) >= 2 else yesterday
         
-        # Signals
-        df_calc['BUY_SIGNAL'] = (
-            (df_calc['close'].shift(1) < df_calc['BB_LOWER'].shift(1)) &
-            (df_calc['close'] > df_calc['BB_LOWER']) &
-            (df_calc['SMA_STOCH'].shift(1) < Config.STO_LOWER)
-        )
-        
-        df_calc['SELL_SIGNAL'] = (
-            (df_calc['close'].shift(1) > df_calc['BB_UPPER'].shift(1)) &
-            (df_calc['close'] < df_calc['BB_UPPER']) &
-            (df_calc['SMA_STOCH'].shift(1) > Config.STO_UPPER)
-        )
-        
-        yesterday = df_calc.iloc[-1]
         yesterday_data = {
             'date': yesterday['datetime'].strftime('%d/%m/%Y'),
             'open': yesterday['open'],
@@ -411,14 +159,14 @@ def fetch_historical_data(symbol):
             'rsi': round(yesterday['RSI'], 2),
             'stoch_rsi': round(yesterday['STOCH_RSI'], 2),
             'sma_stoch': round(yesterday['SMA_STOCH'], 2),
-            'buy': 1 if yesterday['BUY_SIGNAL'] else '',
-            'sell': 1 if yesterday['SELL_SIGNAL'] else '',
-            'signal': 'BUY' if yesterday['BUY_SIGNAL'] else ('SELL' if yesterday['SELL_SIGNAL'] else '')
+            'prev_close': day_before['close'],
+            'prev_bb_upper': day_before['BB_UPPER'],
+            'prev_bb_lower': day_before['BB_LOWER'],
+            'prev_sma_stoch': day_before['SMA_STOCH']
         }
         
-        print(f"   📊 {symbol}: Historical RSI={yesterday_data['rsi']}, Stoch={yesterday_data['stoch_rsi']}")
-        
         return {
+            'df': df,
             'all_closes': df['close'].tolist(),
             'all_highs': df['high'].tolist(),
             'all_lows': df['low'].tolist(),
@@ -426,20 +174,110 @@ def fetch_historical_data(symbol):
         }
         
     except Exception as e:
-        print(f"Error fetching {symbol}: {e}")
+        print(f"Error: {e}")
         return None
 
-# ====================================================================
-# WEBSOCKET CALLBACKS
-# ====================================================================
+# ============================================
+# SAFE CONVERSION
+# ============================================
+
+def safe_float(value, default=0):
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except:
+            return default
+    return default
+
+def safe_int(value, default=0):
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except:
+            return default
+    return default
+
+# ============================================
+# LOGIN
+# ============================================
+
+def Shoonya_login():
+    global api
+    try:     
+        api = ShoonyaApiPy()
+        
+        try:
+            login_sheet = excel_name.sheets['LOGIN']
+            userid = login_sheet.range('B3').value
+            secret = login_sheet.range('B6').value
+            auth = login_sheet.range('B7').value
+            
+            if not userid or not secret or not auth:
+                print("❌ Missing credentials!")
+                return 0
+                
+            userid = str(userid).strip()
+            secret = str(secret).strip()
+            auth = str(auth).strip()
+            
+        except Exception as e:
+            print(f"❌ Error reading LOGIN sheet: {e}")
+            return 0
+        
+        cred = {'client_id': f'{userid}_U', 'secret': secret, 'uid': userid}
+        result = api.getAccessToken(auth, secret, cred['client_id'], userid)
+        
+        if result:
+            acc_tok, usrid, ref_tok, actid = result
+            api.injectOAuthHeader(acc_tok, userid, actid)
+            print("✅ Login Successful!")
+            return 1
+        else:
+            print("❌ Login failed")
+            
+    except Exception as e:
+        print(f"Login error: {e}")
+    return 0
+
+# ============================================
+# GET TOKEN
+# ============================================
+
+def GetToken(exchange, tradingsymbol):
+    try:
+        search = tradingsymbol.replace('-EQ', '').strip()
+        result = api.searchscrip(exchange=exchange, searchtext=search)
+        if result and result.get('values'):
+            for item in result['values']:
+                tsym = item.get('tsym', '').upper()
+                if tsym in [tradingsymbol.upper(), search.upper()]:
+                    return item.get('token')
+            return result['values'][0].get('token')
+    except Exception as e:
+        print(f"Token error: {e}")
+    return None
+
+# ============================================
+# WEBSOCKET CALLBACKS - DAILY TIMEFRAME
+# ============================================
 
 def on_ticks(tick):
-    global live_data, tick_count
+    global live_data, tick_count, today_price, last_updated_date
+    
     try:
         if isinstance(tick, str):
             tick = json.loads(tick)
         
         tick_count += 1
+        
         key = f"{tick['e']}|{tick['tk']}"
         
         if key in live_data:
@@ -448,32 +286,135 @@ def on_ticks(tick):
             volume = safe_int(tick.get('v', d.get('volume', 0)))
             open_price = safe_float(tick.get('o', d.get('open', 0)))
             
+            symbol = d['symbol']
+            today = datetime.now().date()
+            
             if d.get('first_tick', True):
                 d['first_tick'] = False
                 d['open'] = open_price if open_price > 0 else ltp
                 d['high'] = ltp
                 d['low'] = ltp
-                print(f"\n✓ First tick for {d['symbol']}: LTP={ltp}")
+                print(f"\n✓ First tick for {symbol}: LTP={ltp}")
             
+            # Update high/low for the day
             if ltp > d.get('high', 0):
                 d['high'] = ltp
             if ltp < d.get('low', 999999):
                 d['low'] = ltp
             
             d['ltp'] = ltp
-            d['close'] = ltp
             d['volume'] = volume
             d['timestamp'] = datetime.now()
             
-            if 'indicator' in d:
-                result = d['indicator'].add_tick(ltp)
-                if result:
-                    for k, v in result.items():
-                        d[k] = v
+            # ---------- DAILY TIMEFRAME LOGIC ----------
+            # Only update daily close at the end of the day, 
+            # OR use LTP as today's close for real-time daily chart
+            
+            # Store today's price for daily close
+            today_price[symbol] = ltp
+            
+            # For real-time daily chart, use LTP as the closing price
+            # This matches TradingView's daily chart during market hours
+            d['close'] = ltp
+            
+            # Get daily indicators based on today's close
+            hist = historical_data_cache.get(symbol)
+            
+            if hist:
+                # Get yesterday's values
+                yesterday = hist['yesterday']
                 
-                if tick_count <= 10:
-                    print(f"   {d['symbol']}: RSI={d.get('rsi', 0):.1f}")
-                    
+                # Create a daily series with yesterday's close and today's LTP
+                # This is how TradingView calculates daily indicators in real-time
+                import pandas as pd
+                
+                # Use historical closes + today's LTP as the daily close
+                all_closes = hist['all_closes'].copy()
+                all_closes.append(ltp)
+                
+                # Calculate indicators on this series
+                df = pd.DataFrame({'close': all_closes})
+                
+                # RSI
+                delta = df['close'].diff()
+                gain = delta.where(delta > 0, 0.0)
+                loss = -delta.where(delta < 0, 0.0)
+                alpha = 1.0 / Config.RSI_LENGTH
+                avg_gain = gain.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
+                avg_loss = loss.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+                rsi = rsi.fillna(50)
+                
+                # StochRSI
+                rsi_series = rsi
+                rsi_low = rsi_series.rolling(Config.STOCH_LENGTH).min()
+                rsi_high = rsi_series.rolling(Config.STOCH_LENGTH).max()
+                stoch = 100 * (rsi_series - rsi_low) / (rsi_high - rsi_low)
+                stoch = stoch.fillna(50)
+                sma_stoch = stoch.rolling(3).mean()
+                
+                # Bollinger Bands
+                sma = df['close'].rolling(Config.BB_LENGTH).mean()
+                stdev = df['close'].rolling(Config.BB_LENGTH).std(ddof=0)
+                bb_upper = sma + (Config.BB_STD * stdev)
+                bb_lower = sma - (Config.BB_STD * stdev)
+                
+                # Get latest values
+                latest_rsi = rsi.iloc[-1] if len(rsi) > 0 else 50
+                latest_stoch = stoch.iloc[-1] if len(stoch) > 0 else 50
+                latest_sma_stoch = sma_stoch.iloc[-1] if len(sma_stoch) > 0 else 50
+                latest_bb_upper = bb_upper.iloc[-1] if len(bb_upper) > 0 else 0
+                latest_bb_middle = sma.iloc[-1] if len(sma) > 0 else 0
+                latest_bb_lower = bb_lower.iloc[-1] if len(bb_lower) > 0 else 0
+                
+                # Previous values for signals
+                prev_bb_upper = bb_upper.iloc[-2] if len(bb_upper) >= 2 else latest_bb_upper
+                prev_bb_lower = bb_lower.iloc[-2] if len(bb_lower) >= 2 else latest_bb_lower
+                prev_close = all_closes[-2] if len(all_closes) >= 2 else ltp
+                prev_sma_stoch = sma_stoch.iloc[-2] if len(sma_stoch) >= 2 else latest_sma_stoch
+                
+                # Update live data with daily indicator values
+                d['rsi'] = round(latest_rsi, 2)
+                d['stoch_rsi'] = round(latest_stoch, 2)
+                d['sma_stoch'] = round(latest_sma_stoch, 2)
+                d['bb_upper'] = round(latest_bb_upper, 2)
+                d['bb_middle'] = round(latest_bb_middle, 2)
+                d['bb_lower'] = round(latest_bb_lower, 2)
+                d['prev_close'] = prev_close
+                d['prev_bb_upper'] = prev_bb_upper
+                d['prev_bb_lower'] = prev_bb_lower
+                d['prev_sma_stoch'] = prev_sma_stoch
+                
+                # Generate signals
+                buy_signal = False
+                sell_signal = False
+                signal = ""
+                
+                # BUY: Price crosses above lower band + StochRSI oversold
+                if (prev_close < prev_bb_lower and 
+                    ltp > latest_bb_lower and 
+                    prev_sma_stoch < Config.STOCH_LOWER):
+                    buy_signal = True
+                    signal = "BUY"
+                    print(f"🔵 DAILY BUY {symbol} | Price:{ltp:.2f} | BB Lower:{latest_bb_lower:.2f}")
+                
+                # SELL: Price crosses below upper band + StochRSI overbought
+                elif (prev_close > prev_bb_upper and 
+                      ltp < latest_bb_upper and 
+                      prev_sma_stoch > Config.STOCH_UPPER):
+                    sell_signal = True
+                    signal = "SELL"
+                    print(f"🔴 DAILY SELL {symbol} | Price:{ltp:.2f} | BB Upper:{latest_bb_upper:.2f}")
+                
+                d['buy'] = 1 if buy_signal else ''
+                d['sell'] = 1 if sell_signal else ''
+                d['signal'] = signal
+                
+                # Print debug every 100 ticks
+                if tick_count % 100 == 0:
+                    print(f"📊 {symbol}: RSI={latest_rsi:.1f}, Stoch={latest_stoch:.1f}, BB={latest_bb_lower:.1f}-{latest_bb_upper:.1f}")
+                
     except Exception as e:
         pass
 
@@ -501,49 +442,184 @@ def subscribe_symbols(tokens_list):
             print(f"Subscribe error: {e}")
         time.sleep(0.1)
 
-# ====================================================================
-# EXCEL FUNCTIONS
-# ====================================================================
+# ============================================
+# CHECK NEW SYMBOLS
+# ============================================
+
+def check_new_symbols():
+    global last_symbol_check
+    
+    try:
+        ws = excel_name.sheets['symbols']
+        symbols_data = ws.range("A2:A100").value
+        current = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
+        
+        cleaned = []
+        for s in current:
+            s_str = s.upper()
+            if s_str.startswith('NSE:'):
+                s_str = s_str[4:]
+            if not s_str.endswith('-EQ'):
+                s_str = f"{s_str}-EQ"
+            cleaned.append(s_str)
+        
+        new_symbols = [s for s in cleaned if s not in symbol_tokens]
+        
+        if new_symbols:
+            print(f"\n🆕 Found {len(new_symbols)} new symbols")
+            new_tokens = []
+            for symbol in new_symbols:
+                try:
+                    token = GetToken("NSE", symbol)
+                    if token:
+                        tk = f"NSE|{token}"
+                        symbol_tokens[symbol] = tk
+                        token_symbols[token] = symbol
+                        
+                        hist_data = fetch_historical_data(symbol)
+                        
+                        live_data[tk] = {
+                            'symbol': symbol,
+                            'first_tick': True,
+                            'ltp': 0, 'volume': 0,
+                            'open': 0, 'high': 0, 'low': 0, 'close': 0,
+                            'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
+                            'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
+                            'buy': '', 'sell': '', 'signal': '',
+                            'prev_close': 0,
+                            'prev_bb_upper': 0,
+                            'prev_bb_lower': 0,
+                            'prev_sma_stoch': 50,
+                            'timestamp': None
+                        }
+                        new_tokens.append(tk)
+                        
+                        if hist_data:
+                            historical_data_cache[symbol] = hist_data
+                            # Set initial indicator values from historical
+                            live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
+                            live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
+                            live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
+                            live_data[tk]['bb_upper'] = hist_data['yesterday']['bb_upper']
+                            live_data[tk]['bb_middle'] = hist_data['yesterday']['bb_middle']
+                            live_data[tk]['bb_lower'] = hist_data['yesterday']['bb_lower']
+                            live_data[tk]['prev_close'] = hist_data['yesterday']['prev_close']
+                            live_data[tk]['prev_bb_upper'] = hist_data['yesterday']['prev_bb_upper']
+                            live_data[tk]['prev_bb_lower'] = hist_data['yesterday']['prev_bb_lower']
+                            live_data[tk]['prev_sma_stoch'] = hist_data['yesterday']['prev_sma_stoch']
+                        
+                        print(f"   ✓ Added {symbol}")
+                except Exception as e:
+                    print(f"   Error adding {symbol}: {e}")
+                time.sleep(0.05)
+            
+            if new_tokens and feed_opened:
+                subscribe_symbols(new_tokens)
+                print(f"✓ Subscribed to {len(new_tokens)} new symbols\n")
+    except Exception as e:
+        pass
+
+# ============================================
+# UPDATE EXCEL
+# ============================================
+
+def update_excel_bulk():
+    global last_excel_update
+    
+    try:
+        current_time = time.time()
+        if current_time - last_excel_update < Config.EXCEL_UPDATE_INTERVAL:
+            return
+        last_excel_update = current_time
+        
+        ws = excel_name.sheets['symbols']
+        symbols_data = ws.range("A2:A200").value
+        if not symbols_data:
+            return
+        
+        rows = []
+        
+        for symbol_cell in symbols_data:
+            if not symbol_cell:
+                rows.append([''] * 32)
+                continue
+            
+            symbol = str(symbol_cell).strip().upper()
+            if symbol.startswith('NSE:'):
+                symbol = symbol[4:]
+            if not symbol.endswith('-EQ'):
+                symbol = f"{symbol}-EQ"
+            
+            tk = symbol_tokens.get(symbol)
+            hist = historical_data_cache.get(symbol)
+            hist_yesterday = hist['yesterday'] if hist else {}
+            
+            if tk and tk in live_data:
+                d = live_data[tk]
+                ltp = d.get('ltp', 0)
+                
+                rows.append([
+                    symbol,
+                    ltp if ltp > 0 else '',
+                    d.get('open', 0) if d.get('open', 0) > 0 else '',
+                    d.get('high', 0) if d.get('high', 0) > 0 else '',
+                    d.get('low', 0) if d.get('low', 0) > 0 else '',
+                    d.get('close', 0) if d.get('close', 0) > 0 else '',
+                    d.get('volume', 0) if d.get('volume', 0) > 0 else '',
+                    d.get('rsi', ''),
+                    d.get('stoch_rsi', ''),
+                    d.get('sma_stoch', ''),
+                    d.get('bb_upper', ''),
+                    d.get('bb_middle', ''),
+                    d.get('bb_lower', ''),
+                    d.get('buy', ''),
+                    d.get('sell', ''),
+                    d.get('signal', ''),
+                    d['timestamp'].strftime('%H:%M:%S') if d.get('timestamp') else '',
+                    hist_yesterday.get('date', ''),
+                    hist_yesterday.get('open', ''),
+                    hist_yesterday.get('high', ''),
+                    hist_yesterday.get('low', ''),
+                    hist_yesterday.get('close', ''),
+                    hist_yesterday.get('volume', ''),
+                    hist_yesterday.get('rsi', ''),
+                    hist_yesterday.get('stoch_rsi', ''),
+                    hist_yesterday.get('sma_stoch', ''),
+                    hist_yesterday.get('bb_upper', ''),
+                    hist_yesterday.get('bb_middle', ''),
+                    hist_yesterday.get('bb_lower', ''),
+                    hist_yesterday.get('buy', ''),
+                    hist_yesterday.get('sell', ''),
+                    hist_yesterday.get('signal', '')
+                ])
+            else:
+                rows.append([''] * 32)
+        
+        try:
+            if rows:
+                ws.range(f"A2:AF{2 + len(rows) - 1}").value = rows
+        except Exception:
+            pass
+            
+    except Exception:
+        pass
+
+# ============================================
+# SETUP HEADERS
+# ============================================
 
 def setup_excel_headers():
     try:
         ws = excel_name.sheets['symbols']
         ws.range("1:1").clear_contents()
         
-        # 32 columns total: A (Symbol) + B-Q (16 live) + R-AF (16 historical)
         headers = [
-            'Symbol',     # A
-            'LTP',        # B
-            'Open',       # C
-            'High',       # D
-            'Low',        # E
-            'Close',      # F
-            'Volume',     # G
-            'RSI',        # H
-            'StochRSI',   # I
-            'SMA Stoch',  # J
-            'BB Upper',   # K
-            'BB Middle',  # L
-            'BB Lower',   # M
-            'BUY',        # N
-            'SELL',       # O
-            'Signal',     # P
-            'Last Update',# Q
-            'Date',       # R
-            'Open',       # S
-            'High',       # T
-            'Low',        # U
-            'Close',      # V
-            'Volume',     # W
-            'RSI',        # X
-            'StochRSI',   # Y
-            'SMA Stoch',  # Z
-            'BB Upper',   # AA
-            'BB Middle',  # AB
-            'BB Lower',   # AC
-            'BUY',        # AD
-            'SELL',       # AE
-            'Signal'      # AF
+            'Symbol', 'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
+            'RSI', 'StochRSI', 'SMA Stoch', 'BB Upper', 'BB Middle', 'BB Lower',
+            'BUY', 'SELL', 'Signal', 'Last Update',
+            'Date', 'Open', 'High', 'Low', 'Close', 'Volume',
+            'RSI', 'StochRSI', 'SMA Stoch', 'BB Upper', 'BB Middle', 'BB Lower',
+            'BUY', 'SELL', 'Signal'
         ]
         
         for col_idx, header in enumerate(headers, start=1):
@@ -561,180 +637,47 @@ def setup_excel_headers():
         
         ws.range('A:AF').column_width = 12
         ws.range('A:A').column_width = 20
-        
+
         return True
     except Exception as e:
-        print(f"Error setting up headers: {e}")
+        print(f"Error: {e}")
         return False
+
+# ============================================
+# READ SYMBOLS
+# ============================================
 
 def read_symbols_from_excel():
     try:
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range("A2:A200").value
-        symbols = []
-        if symbols_data:
-            for s in symbols_data:
-                if s:
-                    s_str = str(s).strip().upper()
-                    if s_str.startswith('NSE:'):
-                        s_str = s_str[4:]
-                    if not s_str.endswith('-EQ'):
-                        s_str = f"{s_str}-EQ"
-                    symbols.append(s_str)
-        return symbols
+        symbols = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
+        
+        cleaned = []
+        seen = set()
+        for s in symbols:
+            s_str = s.upper()
+            if s_str.startswith('NSE:'):
+                s_str = s_str[4:]
+            if not s_str.endswith('-EQ'):
+                s_str = f"{s_str}-EQ"
+            if s_str not in seen:
+                seen.add(s_str)
+                cleaned.append(s_str)
+        return cleaned
     except Exception:
         return []
 
-def update_excel_bulk():
-    global last_excel_update
-    try:
-        current_time = time.time()
-        if current_time - last_excel_update < Config.EXCEL_UPDATE_INTERVAL:
-            return
-        last_excel_update = current_time
-        
-        ws = excel_name.sheets['symbols']
-        symbols_list = ws.range("A2:A200").value
-        
-        if not symbols_list:
-            return
-        
-        rows = []
-        
-        for symbol_val in symbols_list:
-            if not symbol_val:
-                rows.append([''] * 32)
-                continue
-            
-            symbol = str(symbol_val).strip().upper()
-            if symbol.startswith('NSE:'):
-                symbol = symbol[4:]
-            if not symbol.endswith('-EQ'):
-                symbol = f"{symbol}-EQ"
-            
-            tk = symbol_tokens.get(symbol)
-            hist = historical_data_cache.get(symbol, {})
-            
-            if tk and tk in live_data:
-                d = live_data[tk]
-                
-                rows.append([
-                    symbol,                                              # A
-                    d.get('ltp', ''),                                    # B
-                    d.get('open', ''),                                   # C
-                    d.get('high', ''),                                   # D
-                    d.get('low', ''),                                    # E
-                    d.get('close', ''),                                  # F
-                    d.get('volume', ''),                                 # G
-                    d.get('rsi', ''),                                    # H
-                    d.get('stoch_rsi', ''),                              # I
-                    d.get('sma_stoch', ''),                              # J
-                    d.get('bb_upper', ''),                               # K
-                    d.get('bb_middle', ''),                              # L
-                    d.get('bb_lower', ''),                               # M
-                    d.get('buy', ''),                                    # N
-                    d.get('sell', ''),                                   # O
-                    d.get('signal', ''),                                 # P
-                    d['timestamp'].strftime('%H:%M:%S') if d.get('timestamp') else '',  # Q
-                    hist.get('date', ''),                                # R
-                    hist.get('open', ''),                                # S
-                    hist.get('high', ''),                                # T
-                    hist.get('low', ''),                                 # U
-                    hist.get('close', ''),                               # V
-                    hist.get('volume', ''),                              # W
-                    hist.get('rsi', ''),                                 # X
-                    hist.get('stoch_rsi', ''),                           # Y
-                    hist.get('sma_stoch', ''),                           # Z
-                    hist.get('bb_upper', ''),                            # AA
-                    hist.get('bb_middle', ''),                           # AB
-                    hist.get('bb_lower', ''),                            # AC
-                    hist.get('buy', ''),                                 # AD
-                    hist.get('sell', ''),                                # AE
-                    hist.get('signal', '')                               # AF
-                ])
-            else:
-                rows.append([''] * 32)
-        
-        if rows:
-            ws.range(f"A2:AF{2 + len(rows) - 1}").value = rows
-            
-    except Exception as e:
-        print(f"Excel update error: {e}")
-
-def check_new_symbols():
-    global last_symbol_check
-    try:
-        ws = excel_name.sheets['symbols']
-        symbols_data = ws.range("A2:A100").value
-        
-        if not symbols_data:
-            return
-        
-        current_symbols = []
-        for s in symbols_data:
-            if s:
-                s_str = str(s).strip().upper()
-                if s_str.startswith('NSE:'):
-                    s_str = s_str[4:]
-                if not s_str.endswith('-EQ'):
-                    s_str = f"{s_str}-EQ"
-                current_symbols.append(s_str)
-            else:
-                current_symbols.append('')
-        
-        new_symbols = []
-        for symbol in current_symbols:
-            if symbol and symbol not in symbol_tokens:
-                new_symbols.append(symbol)
-        
-        if new_symbols:
-            print(f"\n🆕 Found {len(new_symbols)} new symbols: {new_symbols}")
-            new_tokens = []
-            
-            for symbol in new_symbols:
-                try:
-                    token = GetToken("NSE", symbol)
-                    if token:
-                        tk = f"NSE|{token}"
-                        symbol_tokens[symbol] = tk
-                        token_symbols[token] = symbol
-                        
-                        hist_data = fetch_historical_data(symbol)
-                        
-                        live_data[tk] = {
-                            'symbol': symbol,
-                            'first_tick': True,
-                            'indicator': FastLiveIndicator(symbol, hist_data['all_closes'] if hist_data else []),
-                            'ltp': 0, 'volume': 0,
-                            'open': 0, 'high': 0, 'low': 0, 'close': 0,
-                            'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
-                            'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
-                            'buy': '', 'sell': '', 'signal': '',
-                            'timestamp': None
-                        }
-                        new_tokens.append(tk)
-                        
-                        if hist_data:
-                            historical_data_cache[symbol] = hist_data['yesterday']
-                            print(f"   ✅ Added {symbol} with {len(hist_data['all_closes'])} days")
-                        else:
-                            print(f"   ✅ Added {symbol}")
-                except Exception as e:
-                    print(f"   Error adding {symbol}: {e}")
-                time.sleep(0.05)
-            
-            if new_tokens and feed_opened:
-                subscribe_symbols(new_tokens)
-                print(f"✓ Subscribed to {len(new_tokens)} new symbols\n")
-                
-            update_excel_bulk()
-            
-    except Exception as e:
-        print(f"Error in check_new_symbols: {e}")
+# ============================================
+# MAIN EXCEL LOOP
+# ============================================
 
 def start_excel_loop():
     global last_symbol_check, tick_count
-    print("✓ Starting REAL-TIME Excel update loop...\n")
+    
+    print("✓ Starting REAL-TIME DAILY TIMEFRAME update loop...")
+    print(f"📊 Indicators calculated using DAILY closes (matches TradingView)")
+    print("   ⏰ Real-time updates during market hours\n")
     
     update_count = 0
     last_status = time.time()
@@ -767,15 +710,15 @@ def start_excel_loop():
         except Exception:
             time.sleep(0.1)
 
-# ====================================================================
-# MAIN FUNCTION
-# ====================================================================
+# ============================================
+# MAIN
+# ============================================
 
 def main():
     global historical_data_cache
     
     print("\n" + "="*80)
-    print("🚀 STOCHRSI + BOLLINGER BANDS TRADING SYSTEM")
+    print("🚀 DAILY TIMEFRAME - MATCH TRADINGVIEW")
     print("="*80)
     
     print("\n[1/4] Setting up Excel...")
@@ -798,12 +741,11 @@ def main():
         print(f"✅ Added default symbols")
     
     print(f"📋 Processing {len(symbols)} symbols...")
-    print(f"\n[4/4] Loading {Config.LOAD_DAYS} days of historical data...")
     
+    print(f"\n[4/4] Loading historical data...")
     for i, symbol in enumerate(symbols, 1):
         print(f"   [{i:2}/{len(symbols)}] {symbol}...", end=" ")
         token = GetToken("NSE", symbol)
-        
         if token:
             tk = f"NSE|{token}"
             symbol_tokens[symbol] = tk
@@ -814,17 +756,31 @@ def main():
             live_data[tk] = {
                 'symbol': symbol,
                 'first_tick': True,
-                'indicator': FastLiveIndicator(symbol, hist_data['all_closes'] if hist_data else []),
                 'ltp': 0, 'volume': 0,
                 'open': 0, 'high': 0, 'low': 0, 'close': 0,
                 'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
                 'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
                 'buy': '', 'sell': '', 'signal': '',
+                'prev_close': 0,
+                'prev_bb_upper': 0,
+                'prev_bb_lower': 0,
+                'prev_sma_stoch': 50,
                 'timestamp': None
             }
             
             if hist_data:
-                historical_data_cache[symbol] = hist_data['yesterday']
+                historical_data_cache[symbol] = hist_data
+                # Set initial indicator values from historical
+                live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
+                live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
+                live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
+                live_data[tk]['bb_upper'] = hist_data['yesterday']['bb_upper']
+                live_data[tk]['bb_middle'] = hist_data['yesterday']['bb_middle']
+                live_data[tk]['bb_lower'] = hist_data['yesterday']['bb_lower']
+                live_data[tk]['prev_close'] = hist_data['yesterday']['prev_close']
+                live_data[tk]['prev_bb_upper'] = hist_data['yesterday']['prev_bb_upper']
+                live_data[tk]['prev_bb_lower'] = hist_data['yesterday']['prev_bb_lower']
+                live_data[tk]['prev_sma_stoch'] = hist_data['yesterday']['prev_sma_stoch']
                 print(f"✓ ({len(hist_data['all_closes'])} days)")
             else:
                 print(f"⚠️ No data")
@@ -857,7 +813,10 @@ def main():
             print("✅ WebSocket connected!")
             if symbol_tokens:
                 subscribe_symbols(list(symbol_tokens.values()))
-            print("\n🚀 StochRSI Trading System Running...\n")
+            print("\n🚀 Running DAILY TIMEFRAME indicators...")
+            print("   ✅ Indicators calculated using daily closes")
+            print("   ✅ Matches TradingView daily chart")
+            print("   ✅ Real-time updates during market hours\n")
             start_excel_loop()
         else:
             print("❌ WebSocket failed!")
