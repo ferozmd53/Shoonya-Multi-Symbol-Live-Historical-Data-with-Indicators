@@ -397,7 +397,7 @@ def on_ticks(tick):
                     prev_sma_stoch < Config.STOCH_LOWER):
                     buy_signal = True
                     signal = "BUY"
-                    print(f"🔵 DAILY BUY {symbol} | Price:{ltp:.2f} | BB Lower:{latest_bb_lower:.2f}")
+#                    print(f"🔵 DAILY BUY {symbol} | Price:{ltp:.2f} | BB Lower:{latest_bb_lower:.2f}")
                 
                 # SELL: Price crosses below upper band + StochRSI overbought
                 elif (prev_close > prev_bb_upper and 
@@ -405,7 +405,7 @@ def on_ticks(tick):
                       prev_sma_stoch > Config.STOCH_UPPER):
                     sell_signal = True
                     signal = "SELL"
-                    print(f"🔴 DAILY SELL {symbol} | Price:{ltp:.2f} | BB Upper:{latest_bb_upper:.2f}")
+#                    print(f"🔴 DAILY SELL {symbol} | Price:{ltp:.2f} | BB Upper:{latest_bb_upper:.2f}")
                 
                 d['buy'] = 1 if buy_signal else ''
                 d['sell'] = 1 if sell_signal else ''
@@ -522,7 +522,6 @@ def check_new_symbols():
 # ============================================
 # UPDATE EXCEL
 # ============================================
-
 def update_excel_bulk():
     global last_excel_update
     
@@ -541,7 +540,7 @@ def update_excel_bulk():
         
         for symbol_cell in symbols_data:
             if not symbol_cell:
-                rows.append([''] * 32)
+                rows.append([''] * 32)  # Keep full row length
                 continue
             
             symbol = str(symbol_cell).strip().upper()
@@ -558,8 +557,9 @@ def update_excel_bulk():
                 d = live_data[tk]
                 ltp = d.get('ltp', 0)
                 
+                # Full row with Symbol at position 0
                 rows.append([
-                    symbol,
+                    symbol,  # Column A
                     ltp if ltp > 0 else '',
                     d.get('open', 0) if d.get('open', 0) > 0 else '',
                     d.get('high', 0) if d.get('high', 0) > 0 else '',
@@ -595,15 +595,19 @@ def update_excel_bulk():
             else:
                 rows.append([''] * 32)
         
-        try:
-            if rows:
-                ws.range(f"A2:AF{2 + len(rows) - 1}").value = rows
-        except Exception:
-            pass
+        # WRITE DATA - START FROM COLUMN B (skip Column A)
+        if rows:
+            # Convert to only include data from column B onwards (skip Symbol column)
+            data_rows = []
+            for row in rows:
+                data_rows.append(row[1:])  # Skip first column (Symbol)
             
-    except Exception:
-        pass
-
+            if data_rows:
+                ws.range(f"B2:AF{2 + len(data_rows) - 1}").value = data_rows
+                #print(f"✅ Updated {len(data_rows)} rows (Column B onwards)")
+            
+    except Exception as e:
+        print(f"Excel update error: {e}")
 # ============================================
 # SETUP HEADERS
 # ============================================
