@@ -1,4 +1,4 @@
-# Extreme_Reversal_Signal.py - DAILY TIMEFRAME MATCH TRADINGVIEW
+# Extreme_Reversal_Signal.py - FIXED DATA POSITIONS
 
 from NorenRestApiPy.NorenApi import NorenApi
 import time
@@ -8,6 +8,7 @@ import numpy as np
 import json
 import xlwings as xw
 import pandas as pd
+import string
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -22,14 +23,64 @@ live_data = {}
 symbol_tokens = {}
 token_symbols = {}
 historical_data_cache = {}
+order_history = []
 tick_count = 0
 last_symbol_check = 0
 last_excel_update = 0
-today_price = {}  # Store today's price for daily close calculation
-last_updated_date = {}
 
 # ============================================
-# CONFIGURATION
+# COLUMN UTILITY FUNCTIONS
+# ============================================
+
+def get_column_letter(col_num):
+    """Convert column number to letter (1=A, 2=B, etc.)"""
+    result = ""
+    while col_num > 0:
+        col_num -= 1
+        result = chr(65 + col_num % 26) + result
+        col_num //= 26
+    return result
+
+def get_column_number(col_letter):
+    """Convert column letter to number (A=1, B=2, etc.)"""
+    col_letter = col_letter.upper()
+    result = 0
+    for char in col_letter:
+        result = result * 26 + (ord(char) - ord('A') + 1)
+    return result
+
+def get_column_range(start_col, count):
+    """Get list of column letters starting from start_col for 'count' columns"""
+    start_num = get_column_number(start_col)
+    cols = []
+    for i in range(count):
+        cols.append(get_column_letter(start_num + i))
+    return cols
+
+def get_live_headers():
+    """Get live column headers"""
+    return [
+        'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
+        'RSI', 'StochRSI', 'SMA Stoch',
+        'BB Upper', 'BB Middle', 'BB Lower',
+        'BUY', 'SELL', 'Signal', 'Last Update'
+    ]
+
+def get_hist_headers():
+    """Get historical column headers"""
+    return [
+        'Date', 'Open', 'High', 'Low', 'Close', 'Volume',
+        'RSI', 'StochRSI', 'SMA Stoch',
+        'BB Upper', 'BB Middle', 'BB Lower',
+        'BUY', 'SELL', 'Signal'
+    ]
+
+def get_order_headers():
+    """Get order column headers"""
+    return ['Quantity', 'BUY Trigger', 'BUY Status', 'SELL Trigger', 'SELL Status']
+
+# ============================================
+# CONFIGURATION - FULLY CUSTOMIZABLE
 # ============================================
 
 class Config:
@@ -42,6 +93,37 @@ class Config:
     EXCEL_UPDATE_INTERVAL = 0.1
     LOAD_DAYS = 500
     KEEP_DAYS = 500
+    
+    # ==========================================
+    # COLUMN CONFIGURATION - CHANGE ANY START COLUMN
+    # ==========================================
+    
+    SYMBOL_COL = 'A'           # Symbols column
+    
+    LIVE_START = 'B'           # Live data starts here
+    HIST_START = 'W'  #   'W'       # Historical data starts here
+    ORDER_START = 'R'   #    'R'      # Order data starts here
+
+# ============================================
+# AUTO-CALCULATE COLUMN POSITIONS
+# ============================================
+
+LIVE_COUNT = len(get_live_headers())
+HIST_COUNT = len(get_hist_headers())
+ORDER_COUNT = len(get_order_headers())
+
+# Get all column ranges
+LIVE_COLS = get_column_range(Config.LIVE_START, LIVE_COUNT)
+HIST_COLS = get_column_range(Config.HIST_START, HIST_COUNT)
+ORDER_COLS = get_column_range(Config.ORDER_START, ORDER_COUNT)
+
+# Auto-calculate END columns
+LIVE_END = LIVE_COLS[-1] if LIVE_COLS else Config.LIVE_START
+HIST_END = HIST_COLS[-1] if HIST_COLS else Config.HIST_START
+ORDER_END = ORDER_COLS[-1] if ORDER_COLS else Config.ORDER_START
+
+# Get ALL columns in order: A, LIVE, HIST, ORDERS
+ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + HIST_COLS + ORDER_COLS
 
 # ============================================
 # API CLASS
@@ -83,7 +165,94 @@ def tradingview_bb(close, length=20, std=2.0):
     return sma, upper, lower
 
 # ============================================
-# FETCH DAILY HISTORICAL DATA
+# PLACE ORDER FUNCTION
+# ============================================
+
+def place_order(symbol, qty, buy_sell, price=0, product_type='C'):
+    try:
+        if symbol not in symbol_tokens:
+            print(f"❌ Symbol {symbol} not found")
+            return None
+            
+        tk = symbol_tokens[symbol]
+        exchange = tk.split('|')[0]
+        
+        tradingsymbol = symbol
+        
+        print(f"📊 Placing {buy_sell} order: {qty} shares of {symbol}")
+        
+        buy_or_sell = 'B' if buy_sell.upper() == 'BUY' else 'S'
+        
+        if price <= 0:
+            if tk and tk in live_data:
+                current_price = live_data[tk].get('ltp', 0)
+                if current_price > 0:
+                    if buy_sell.upper() == 'BUY':
+                        price = current_price + 5
+                    else:
+                        price = current_price - 5
+                else:
+                    price = 100
+            else:
+                price = 100
+        
+        login_sheet = excel_name.sheets['LOGIN']
+        algo_id = login_sheet.range('B2').value
+        algo_id = str(algo_id).strip() if algo_id else ''
+        
+        if not algo_id:
+            print("❌ algo_id not found in Excel B2 (CLIENT_ID)")
+            return None
+        
+        order_params = {
+            'buy_or_sell': buy_or_sell,
+            'product_type': product_type,
+            'exchange': exchange,
+            'tradingsymbol': tradingsymbol,
+            'quantity': qty,
+            'discloseqty': 0,
+            'price_type': 'LMT',
+            'price': str(price),
+            'trigger_price': None,
+            'retention': 'DAY',
+            'amo': None,
+            'remarks': 'Python_Auto_Trade',
+            'bookloss_price': 0.0,
+            'bookprofit_price': 0.0,
+            'trail_price': 0.0,
+            'algo_id': algo_id
+        }
+        
+        print(f"📋 Order Params: {order_params}")
+        
+        result = api.place_order(**order_params)
+        
+        print(f"📋 API Response: {result}")
+        
+        if result and result.get('norenordno'):
+            order_info = {
+                'order_no': result['norenordno'],
+                'symbol': symbol,
+                'qty': qty,
+                'type': buy_sell,
+                'price': price,
+                'status': result.get('status', 'PENDING'),
+                'time': datetime.now().strftime('%H:%M:%S')
+            }
+            order_history.append(order_info)
+            print(f"✅ Order placed: {buy_sell} {qty} of {symbol}")
+            print(f"   Order No: {result['norenordno']}")
+            return result['norenordno']
+        else:
+            print(f"❌ Order failed: {result}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error placing order: {e}")
+        return None
+
+# ============================================
+# FETCH HISTORICAL DATA
 # ============================================
 
 def fetch_historical_data(symbol):
@@ -130,7 +299,6 @@ def fetch_historical_data(symbol):
         if len(df) < Config.BB_LENGTH:
             return None
         
-        # Calculate indicators using TradingView formulas
         df['RSI'] = tradingview_rsi(df['close'], Config.RSI_LENGTH)
         df['STOCH_RSI'] = tradingview_stochrsi(df['RSI'], Config.STOCH_LENGTH)
         df['SMA_STOCH'] = df['STOCH_RSI'].rolling(3).mean()
@@ -140,11 +308,24 @@ def fetch_historical_data(symbol):
         df['BB_UPPER'] = bb_upper
         df['BB_LOWER'] = bb_lower
         
-        # Get yesterday's data (last row)
-        yesterday = df.iloc[-1]
+        df['BUY_SIGNAL'] = (
+            (df['close'].shift(1) < df['BB_LOWER'].shift(1)) &
+            (df['close'] > df['BB_LOWER']) &
+            (df['SMA_STOCH'].shift(1) < Config.STOCH_LOWER)
+        )
         
-        # Previous day data for signals
+        df['SELL_SIGNAL'] = (
+            (df['close'].shift(1) > df['BB_UPPER'].shift(1)) &
+            (df['close'] < df['BB_UPPER']) &
+            (df['SMA_STOCH'].shift(1) > Config.STOCH_UPPER)
+        )
+        
+        yesterday = df.iloc[-1]
         day_before = df.iloc[-2] if len(df) >= 2 else yesterday
+        
+        buy_signal = 1 if yesterday['BUY_SIGNAL'] else ''
+        sell_signal = 1 if yesterday['SELL_SIGNAL'] else ''
+        signal_text = 'BUY' if yesterday['BUY_SIGNAL'] else ('SELL' if yesterday['SELL_SIGNAL'] else '')
         
         yesterday_data = {
             'date': yesterday['datetime'].strftime('%d/%m/%Y'),
@@ -159,6 +340,9 @@ def fetch_historical_data(symbol):
             'rsi': round(yesterday['RSI'], 2),
             'stoch_rsi': round(yesterday['STOCH_RSI'], 2),
             'sma_stoch': round(yesterday['SMA_STOCH'], 2),
+            'buy': buy_signal,
+            'sell': sell_signal,
+            'signal': signal_text,
             'prev_close': day_before['close'],
             'prev_bb_upper': day_before['BB_UPPER'],
             'prev_bb_lower': day_before['BB_LOWER'],
@@ -174,7 +358,7 @@ def fetch_historical_data(symbol):
         }
         
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error fetching data: {e}")
         return None
 
 # ============================================
@@ -221,7 +405,6 @@ def Shoonya_login():
             auth = login_sheet.range('B7').value
             
             if not userid or not secret or not auth:
-                print("❌ Missing credentials!")
                 return 0
                 
             userid = str(userid).strip()
@@ -229,7 +412,6 @@ def Shoonya_login():
             auth = str(auth).strip()
             
         except Exception as e:
-            print(f"❌ Error reading LOGIN sheet: {e}")
             return 0
         
         cred = {'client_id': f'{userid}_U', 'secret': secret, 'uid': userid}
@@ -262,15 +444,90 @@ def GetToken(exchange, tradingsymbol):
                     return item.get('token')
             return result['values'][0].get('token')
     except Exception as e:
-        print(f"Token error: {e}")
-    return None
+        return None
 
 # ============================================
-# WEBSOCKET CALLBACKS - DAILY TIMEFRAME
+# CHECK ORDER SIGNALS FROM EXCEL
+# ============================================
+
+def check_order_signals():
+    try:
+        ws = excel_name.sheets['symbols']
+        symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value
+        if not symbols_data:
+            return
+        
+        # Get order columns dynamically
+        order_cols = ORDER_COLS
+        if len(order_cols) >= 5:
+            qty_col = order_cols[0]
+            buy_trigger_col = order_cols[1]
+            buy_status_col = order_cols[2]
+            sell_trigger_col = order_cols[3]
+            sell_status_col = order_cols[4]
+        else:
+            return
+        
+        for idx, symbol_cell in enumerate(symbols_data):
+            if not symbol_cell:
+                continue
+            
+            row_num = idx + 2
+            symbol = str(symbol_cell).strip().upper()
+            if symbol.startswith('NSE:'):
+                symbol = symbol[4:]
+            if not symbol.endswith('-EQ'):
+                symbol = f"{symbol}-EQ"
+            
+            if symbol not in symbol_tokens:
+                continue
+            
+            qty_cell = ws.range(f"{qty_col}{row_num}").value
+            qty = int(float(qty_cell)) if qty_cell and str(qty_cell).replace('.', '').isdigit() else 1
+            
+            # Check BUY
+            buy_signal = ws.range(f"{buy_trigger_col}{row_num}").value
+            buy_status = ws.range(f"{buy_status_col}{row_num}").value
+            
+            if buy_signal:
+                buy_signal = str(buy_signal).strip().upper()
+            
+            if buy_signal == "BUY" and not buy_status:
+                print(f"\n🔔 BUY Signal detected for {symbol} (Qty: {qty})")
+                order_no = place_order(symbol, qty, "BUY", price=0, product_type='C')
+                if order_no:
+                    ws.range(f"{buy_status_col}{row_num}").value = f"Bought: {order_no}"
+                    ws.range(f"{buy_trigger_col}{row_num}").value = "DONE"
+                else:
+                    ws.range(f"{buy_status_col}{row_num}").value = "Failed"
+                    ws.range(f"{buy_trigger_col}{row_num}").value = "FAILED"
+            
+            # Check SELL
+            sell_signal = ws.range(f"{sell_trigger_col}{row_num}").value
+            sell_status = ws.range(f"{sell_status_col}{row_num}").value
+            
+            if sell_signal:
+                sell_signal = str(sell_signal).strip().upper()
+            
+            if sell_signal == "SELL" and not sell_status:
+                print(f"\n🔔 SELL Signal detected for {symbol} (Qty: {qty})")
+                order_no = place_order(symbol, qty, "SELL", price=0, product_type='C')
+                if order_no:
+                    ws.range(f"{sell_status_col}{row_num}").value = f"Sold: {order_no}"
+                    ws.range(f"{sell_trigger_col}{row_num}").value = "DONE"
+                else:
+                    ws.range(f"{sell_status_col}{row_num}").value = "Failed"
+                    ws.range(f"{sell_trigger_col}{row_num}").value = "FAILED"
+                    
+    except Exception as e:
+        print(f"Order signal error: {e}")
+
+# ============================================
+# WEBSOCKET CALLBACKS
 # ============================================
 
 def on_ticks(tick):
-    global live_data, tick_count, today_price, last_updated_date
+    global live_data, tick_count
     
     try:
         if isinstance(tick, str):
@@ -287,16 +544,13 @@ def on_ticks(tick):
             open_price = safe_float(tick.get('o', d.get('open', 0)))
             
             symbol = d['symbol']
-            today = datetime.now().date()
             
             if d.get('first_tick', True):
                 d['first_tick'] = False
                 d['open'] = open_price if open_price > 0 else ltp
                 d['high'] = ltp
                 d['low'] = ltp
-                print(f"\n✓ First tick for {symbol}: LTP={ltp}")
             
-            # Update high/low for the day
             if ltp > d.get('high', 0):
                 d['high'] = ltp
             if ltp < d.get('low', 999999):
@@ -305,37 +559,16 @@ def on_ticks(tick):
             d['ltp'] = ltp
             d['volume'] = volume
             d['timestamp'] = datetime.now()
-            
-            # ---------- DAILY TIMEFRAME LOGIC ----------
-            # Only update daily close at the end of the day, 
-            # OR use LTP as today's close for real-time daily chart
-            
-            # Store today's price for daily close
-            today_price[symbol] = ltp
-            
-            # For real-time daily chart, use LTP as the closing price
-            # This matches TradingView's daily chart during market hours
             d['close'] = ltp
             
-            # Get daily indicators based on today's close
             hist = historical_data_cache.get(symbol)
             
             if hist:
-                # Get yesterday's values
-                yesterday = hist['yesterday']
-                
-                # Create a daily series with yesterday's close and today's LTP
-                # This is how TradingView calculates daily indicators in real-time
-                import pandas as pd
-                
-                # Use historical closes + today's LTP as the daily close
                 all_closes = hist['all_closes'].copy()
                 all_closes.append(ltp)
                 
-                # Calculate indicators on this series
                 df = pd.DataFrame({'close': all_closes})
                 
-                # RSI
                 delta = df['close'].diff()
                 gain = delta.where(delta > 0, 0.0)
                 loss = -delta.where(delta < 0, 0.0)
@@ -346,21 +579,17 @@ def on_ticks(tick):
                 rsi = 100 - (100 / (1 + rs))
                 rsi = rsi.fillna(50)
                 
-                # StochRSI
-                rsi_series = rsi
-                rsi_low = rsi_series.rolling(Config.STOCH_LENGTH).min()
-                rsi_high = rsi_series.rolling(Config.STOCH_LENGTH).max()
-                stoch = 100 * (rsi_series - rsi_low) / (rsi_high - rsi_low)
+                rsi_low = rsi.rolling(Config.STOCH_LENGTH).min()
+                rsi_high = rsi.rolling(Config.STOCH_LENGTH).max()
+                stoch = 100 * (rsi - rsi_low) / (rsi_high - rsi_low)
                 stoch = stoch.fillna(50)
                 sma_stoch = stoch.rolling(3).mean()
                 
-                # Bollinger Bands
                 sma = df['close'].rolling(Config.BB_LENGTH).mean()
                 stdev = df['close'].rolling(Config.BB_LENGTH).std(ddof=0)
                 bb_upper = sma + (Config.BB_STD * stdev)
                 bb_lower = sma - (Config.BB_STD * stdev)
                 
-                # Get latest values
                 latest_rsi = rsi.iloc[-1] if len(rsi) > 0 else 50
                 latest_stoch = stoch.iloc[-1] if len(stoch) > 0 else 50
                 latest_sma_stoch = sma_stoch.iloc[-1] if len(sma_stoch) > 0 else 50
@@ -368,13 +597,11 @@ def on_ticks(tick):
                 latest_bb_middle = sma.iloc[-1] if len(sma) > 0 else 0
                 latest_bb_lower = bb_lower.iloc[-1] if len(bb_lower) > 0 else 0
                 
-                # Previous values for signals
                 prev_bb_upper = bb_upper.iloc[-2] if len(bb_upper) >= 2 else latest_bb_upper
                 prev_bb_lower = bb_lower.iloc[-2] if len(bb_lower) >= 2 else latest_bb_lower
                 prev_close = all_closes[-2] if len(all_closes) >= 2 else ltp
                 prev_sma_stoch = sma_stoch.iloc[-2] if len(sma_stoch) >= 2 else latest_sma_stoch
                 
-                # Update live data with daily indicator values
                 d['rsi'] = round(latest_rsi, 2)
                 d['stoch_rsi'] = round(latest_stoch, 2)
                 d['sma_stoch'] = round(latest_sma_stoch, 2)
@@ -386,34 +613,25 @@ def on_ticks(tick):
                 d['prev_bb_lower'] = prev_bb_lower
                 d['prev_sma_stoch'] = prev_sma_stoch
                 
-                # Generate signals
                 buy_signal = False
                 sell_signal = False
                 signal = ""
                 
-                # BUY: Price crosses above lower band + StochRSI oversold
                 if (prev_close < prev_bb_lower and 
                     ltp > latest_bb_lower and 
                     prev_sma_stoch < Config.STOCH_LOWER):
                     buy_signal = True
                     signal = "BUY"
-#                    print(f"🔵 DAILY BUY {symbol} | Price:{ltp:.2f} | BB Lower:{latest_bb_lower:.2f}")
                 
-                # SELL: Price crosses below upper band + StochRSI overbought
                 elif (prev_close > prev_bb_upper and 
                       ltp < latest_bb_upper and 
                       prev_sma_stoch > Config.STOCH_UPPER):
                     sell_signal = True
                     signal = "SELL"
-#                    print(f"🔴 DAILY SELL {symbol} | Price:{ltp:.2f} | BB Upper:{latest_bb_upper:.2f}")
                 
                 d['buy'] = 1 if buy_signal else ''
                 d['sell'] = 1 if sell_signal else ''
                 d['signal'] = signal
-                
-                # Print debug every 100 ticks
-                if tick_count % 100 == 0:
-                    print(f"📊 {symbol}: RSI={latest_rsi:.1f}, Stoch={latest_stoch:.1f}, BB={latest_bb_lower:.1f}-{latest_bb_upper:.1f}")
                 
     except Exception as e:
         pass
@@ -429,7 +647,7 @@ def on_close():
     print("❌ WebSocket Closed")
 
 def on_order(order):
-    pass
+    print(f"📋 Order Update: {order}")
 
 def subscribe_symbols(tokens_list):
     if not tokens_list:
@@ -437,10 +655,283 @@ def subscribe_symbols(tokens_list):
     for i in range(0, len(tokens_list), 10):
         try:
             api.subscribe(tokens_list[i:i+10])
-            print(f"✓ Subscribed to {len(tokens_list[i:i+10])} symbols")
         except Exception as e:
-            print(f"Subscribe error: {e}")
+            pass
         time.sleep(0.1)
+
+# ============================================
+# UPDATE EXCEL - FIXED COLUMN POSITIONS
+# ============================================
+
+def update_excel_bulk():
+    global last_excel_update
+    
+    try:
+        current_time = time.time()
+        if current_time - last_excel_update < Config.EXCEL_UPDATE_INTERVAL:
+            return
+        last_excel_update = current_time
+        
+        ws = excel_name.sheets['symbols']
+        symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value
+        if not symbols_data:
+            return
+        
+        # Get order columns dynamically
+        order_cols = ORDER_COLS
+        if len(order_cols) >= 5:
+            qty_col = order_cols[0]
+            buy_trigger_col = order_cols[1]
+            buy_status_col = order_cols[2]
+            sell_trigger_col = order_cols[3]
+            sell_status_col = order_cols[4]
+        else:
+            return
+        
+        # Save existing order data
+        existing_orders = {}
+        for idx, symbol_cell in enumerate(symbols_data):
+            if not symbol_cell:
+                continue
+            row_num = idx + 2
+            symbol = str(symbol_cell).strip().upper()
+            if symbol.startswith('NSE:'):
+                symbol = symbol[4:]
+            if not symbol.endswith('-EQ'):
+                symbol = f"{symbol}-EQ"
+            
+            qty = ws.range(f"{qty_col}{row_num}").value
+            buy_trigger = ws.range(f"{buy_trigger_col}{row_num}").value
+            buy_status = ws.range(f"{buy_status_col}{row_num}").value
+            sell_trigger = ws.range(f"{sell_trigger_col}{row_num}").value
+            sell_status = ws.range(f"{sell_status_col}{row_num}").value
+            
+            existing_orders[symbol] = {
+                'qty': qty if qty else '',
+                'buy_trigger': buy_trigger if buy_trigger else '',
+                'buy_status': buy_status if buy_status else '',
+                'sell_trigger': sell_trigger if sell_trigger else '',
+                'sell_status': sell_status if sell_status else ''
+            }
+        
+        rows = []
+        
+        for symbol_cell in symbols_data:
+            if not symbol_cell:
+                rows.append([''] * len(ALL_COLS))
+                continue
+            
+            symbol = str(symbol_cell).strip().upper()
+            if symbol.startswith('NSE:'):
+                symbol = symbol[4:]
+            if not symbol.endswith('-EQ'):
+                symbol = f"{symbol}-EQ"
+            
+            tk = symbol_tokens.get(symbol)
+            hist = historical_data_cache.get(symbol)
+            hist_yesterday = hist['yesterday'] if hist else {}
+            order_data = existing_orders.get(symbol, {})
+            
+            if tk and tk in live_data:
+                d = live_data[tk]
+                ltp = d.get('ltp', 0)
+                
+                # Build row in correct order: A, LIVE, HIST, ORDERS
+                row = []
+                
+                # Column A: Symbol
+                row.append(symbol)
+                
+                # LIVE DATA (Columns B-Q)
+                row.extend([
+                    ltp if ltp > 0 else '',
+                    d.get('open', 0) if d.get('open', 0) > 0 else '',
+                    d.get('high', 0) if d.get('high', 0) > 0 else '',
+                    d.get('low', 0) if d.get('low', 0) > 0 else '',
+                    d.get('close', 0) if d.get('close', 0) > 0 else '',
+                    d.get('volume', 0) if d.get('volume', 0) > 0 else '',
+                    d.get('rsi', ''),
+                    d.get('stoch_rsi', ''),
+                    d.get('sma_stoch', ''),
+                    d.get('bb_upper', ''),
+                    d.get('bb_middle', ''),
+                    d.get('bb_lower', ''),
+                    d.get('buy', ''),
+                    d.get('sell', ''),
+                    d.get('signal', ''),
+                    d['timestamp'].strftime('%H:%M:%S') if d.get('timestamp') else ''
+                ])
+                
+                # HISTORICAL DATA (Columns W-AK)
+                row.extend([
+                    hist_yesterday.get('date', ''),
+                    hist_yesterday.get('open', ''),
+                    hist_yesterday.get('high', ''),
+                    hist_yesterday.get('low', ''),
+                    hist_yesterday.get('close', ''),
+                    hist_yesterday.get('volume', ''),
+                    hist_yesterday.get('rsi', ''),
+                    hist_yesterday.get('stoch_rsi', ''),
+                    hist_yesterday.get('sma_stoch', ''),
+                    hist_yesterday.get('bb_upper', ''),
+                    hist_yesterday.get('bb_middle', ''),
+                    hist_yesterday.get('bb_lower', ''),
+                    hist_yesterday.get('buy', ''),
+                    hist_yesterday.get('sell', ''),
+                    hist_yesterday.get('signal', '')
+                ])
+                
+                # ORDERS (Columns R-V) - PLACE ORDER COLUMNS BEFORE HISTORICAL
+                # Wait! The order should be: Symbol, LIVE, ORDERS, HISTORICAL
+                # But your config says: LIVE(B-Q), ORDERS(R-V), HISTORICAL(W-AK)
+                # So the correct order is: Symbol, LIVE, ORDERS, HISTORICAL
+                
+                # Let me fix this - the row should be built in this exact order:
+                # 1. Symbol (A)
+                # 2. LIVE (B-Q) 
+                # 3. ORDERS (R-V)
+                # 4. HISTORICAL (W-AK)
+                
+                # I need to rebuild the row properly
+                row_correct = []
+                
+                # 1. Symbol
+                row_correct.append(symbol)
+                
+                # 2. LIVE DATA (B-Q)
+                row_correct.extend([
+                    ltp if ltp > 0 else '',
+                    d.get('open', 0) if d.get('open', 0) > 0 else '',
+                    d.get('high', 0) if d.get('high', 0) > 0 else '',
+                    d.get('low', 0) if d.get('low', 0) > 0 else '',
+                    d.get('close', 0) if d.get('close', 0) > 0 else '',
+                    d.get('volume', 0) if d.get('volume', 0) > 0 else '',
+                    d.get('rsi', ''),
+                    d.get('stoch_rsi', ''),
+                    d.get('sma_stoch', ''),
+                    d.get('bb_upper', ''),
+                    d.get('bb_middle', ''),
+                    d.get('bb_lower', ''),
+                    d.get('buy', ''),
+                    d.get('sell', ''),
+                    d.get('signal', ''),
+                    d['timestamp'].strftime('%H:%M:%S') if d.get('timestamp') else ''
+                ])
+                
+                # 3. ORDERS (R-V)
+                row_correct.extend([
+                    order_data.get('qty', ''),
+                    order_data.get('buy_trigger', ''),
+                    order_data.get('buy_status', ''),
+                    order_data.get('sell_trigger', ''),
+                    order_data.get('sell_status', '')
+                ])
+                
+                # 4. HISTORICAL DATA (W-AK)
+                row_correct.extend([
+                    hist_yesterday.get('date', ''),
+                    hist_yesterday.get('open', ''),
+                    hist_yesterday.get('high', ''),
+                    hist_yesterday.get('low', ''),
+                    hist_yesterday.get('close', ''),
+                    hist_yesterday.get('volume', ''),
+                    hist_yesterday.get('rsi', ''),
+                    hist_yesterday.get('stoch_rsi', ''),
+                    hist_yesterday.get('sma_stoch', ''),
+                    hist_yesterday.get('bb_upper', ''),
+                    hist_yesterday.get('bb_middle', ''),
+                    hist_yesterday.get('bb_lower', ''),
+                    hist_yesterday.get('buy', ''),
+                    hist_yesterday.get('sell', ''),
+                    hist_yesterday.get('signal', '')
+                ])
+                
+                rows.append(row_correct)
+            else:
+                rows.append([''] * len(ALL_COLS))
+        
+        if rows:
+            data_rows = []
+            for row in rows:
+                data_rows.append(row[1:])  # Skip column A
+            
+            if data_rows:
+                start_col = 'B'
+                end_col = ALL_COLS[-1]
+                ws.range(f"{start_col}2:{end_col}{2 + len(data_rows) - 1}").value = data_rows
+            
+    except Exception as e:
+        print(f"Excel update error: {e}")
+
+# ============================================
+# SETUP HEADERS - DYNAMIC
+# ============================================
+
+def setup_excel_headers():
+    try:
+        ws = excel_name.sheets['symbols']
+        ws.range("1:1").clear_contents()
+        
+        # Build headers in correct order: Symbol, LIVE, ORDERS, HISTORICAL
+        headers = ['Symbol']
+        headers.extend(get_live_headers())
+        headers.extend(get_order_headers())
+        headers.extend(get_hist_headers())
+        
+        # Write headers
+        for col_idx, header in enumerate(headers, start=1):
+            cell = ws.range((1, col_idx))
+            cell.value = header
+            
+            # Color coding based on section
+            if header in ['BUY', 'SELL', 'Signal']:
+                cell.color = (255, 100, 100)
+            elif col_idx > len(get_live_headers()) + 1 and col_idx <= len(get_live_headers()) + len(get_order_headers()) + 1:
+                # Order section
+                cell.color = (0, 100, 0)
+                cell.font.color = (255, 255, 255)
+            elif col_idx > len(get_live_headers()) + len(get_order_headers()) + 1:
+                # Historical section
+                cell.color = (146, 96, 54)
+            else:
+                # Live section
+                cell.color = (54, 96, 146)
+            cell.font.color = (255, 255, 255)
+            cell.font.bold = True
+        
+        # Set column widths
+        for col in ALL_COLS:
+            ws.range(f'{col}:{col}').column_width = 12
+        ws.range('A:A').column_width = 20
+
+        return True
+    except Exception:
+        return False
+
+# ============================================
+# READ SYMBOLS
+# ============================================
+
+def read_symbols_from_excel():
+    try:
+        ws = excel_name.sheets['symbols']
+        symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value
+        symbols = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
+        
+        cleaned = []
+        seen = set()
+        for s in symbols:
+            s_str = s.upper()
+            if s_str.startswith('NSE:'):
+                s_str = s_str[4:]
+            if not s_str.endswith('-EQ'):
+                s_str = f"{s_str}-EQ"
+            if s_str not in seen:
+                seen.add(s_str)
+                cleaned.append(s_str)
+        return cleaned
+    except Exception:
+        return []
 
 # ============================================
 # CHECK NEW SYMBOLS
@@ -451,7 +942,7 @@ def check_new_symbols():
     
     try:
         ws = excel_name.sheets['symbols']
-        symbols_data = ws.range("A2:A100").value
+        symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}100").value
         current = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
         
         cleaned = []
@@ -466,7 +957,7 @@ def check_new_symbols():
         new_symbols = [s for s in cleaned if s not in symbol_tokens]
         
         if new_symbols:
-            print(f"\n🆕 Found {len(new_symbols)} new symbols")
+            print(f"🆕 Found {len(new_symbols)} new symbols")
             new_tokens = []
             for symbol in new_symbols:
                 try:
@@ -496,7 +987,6 @@ def check_new_symbols():
                         
                         if hist_data:
                             historical_data_cache[symbol] = hist_data
-                            # Set initial indicator values from historical
                             live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
                             live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
                             live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
@@ -520,168 +1010,17 @@ def check_new_symbols():
         pass
 
 # ============================================
-# UPDATE EXCEL
-# ============================================
-def update_excel_bulk():
-    global last_excel_update
-    
-    try:
-        current_time = time.time()
-        if current_time - last_excel_update < Config.EXCEL_UPDATE_INTERVAL:
-            return
-        last_excel_update = current_time
-        
-        ws = excel_name.sheets['symbols']
-        symbols_data = ws.range("A2:A200").value
-        if not symbols_data:
-            return
-        
-        rows = []
-        
-        for symbol_cell in symbols_data:
-            if not symbol_cell:
-                rows.append([''] * 32)  # Keep full row length
-                continue
-            
-            symbol = str(symbol_cell).strip().upper()
-            if symbol.startswith('NSE:'):
-                symbol = symbol[4:]
-            if not symbol.endswith('-EQ'):
-                symbol = f"{symbol}-EQ"
-            
-            tk = symbol_tokens.get(symbol)
-            hist = historical_data_cache.get(symbol)
-            hist_yesterday = hist['yesterday'] if hist else {}
-            
-            if tk and tk in live_data:
-                d = live_data[tk]
-                ltp = d.get('ltp', 0)
-                
-                # Full row with Symbol at position 0
-                rows.append([
-                    symbol,  # Column A
-                    ltp if ltp > 0 else '',
-                    d.get('open', 0) if d.get('open', 0) > 0 else '',
-                    d.get('high', 0) if d.get('high', 0) > 0 else '',
-                    d.get('low', 0) if d.get('low', 0) > 0 else '',
-                    d.get('close', 0) if d.get('close', 0) > 0 else '',
-                    d.get('volume', 0) if d.get('volume', 0) > 0 else '',
-                    d.get('rsi', ''),
-                    d.get('stoch_rsi', ''),
-                    d.get('sma_stoch', ''),
-                    d.get('bb_upper', ''),
-                    d.get('bb_middle', ''),
-                    d.get('bb_lower', ''),
-                    d.get('buy', ''),
-                    d.get('sell', ''),
-                    d.get('signal', ''),
-                    d['timestamp'].strftime('%H:%M:%S') if d.get('timestamp') else '',
-                    hist_yesterday.get('date', ''),
-                    hist_yesterday.get('open', ''),
-                    hist_yesterday.get('high', ''),
-                    hist_yesterday.get('low', ''),
-                    hist_yesterday.get('close', ''),
-                    hist_yesterday.get('volume', ''),
-                    hist_yesterday.get('rsi', ''),
-                    hist_yesterday.get('stoch_rsi', ''),
-                    hist_yesterday.get('sma_stoch', ''),
-                    hist_yesterday.get('bb_upper', ''),
-                    hist_yesterday.get('bb_middle', ''),
-                    hist_yesterday.get('bb_lower', ''),
-                    hist_yesterday.get('buy', ''),
-                    hist_yesterday.get('sell', ''),
-                    hist_yesterday.get('signal', '')
-                ])
-            else:
-                rows.append([''] * 32)
-        
-        # WRITE DATA - START FROM COLUMN B (skip Column A)
-        if rows:
-            # Convert to only include data from column B onwards (skip Symbol column)
-            data_rows = []
-            for row in rows:
-                data_rows.append(row[1:])  # Skip first column (Symbol)
-            
-            if data_rows:
-                ws.range(f"B2:AF{2 + len(data_rows) - 1}").value = data_rows
-                #print(f"✅ Updated {len(data_rows)} rows (Column B onwards)")
-            
-    except Exception as e:
-        print(f"Excel update error: {e}")
-# ============================================
-# SETUP HEADERS
-# ============================================
-
-def setup_excel_headers():
-    try:
-        ws = excel_name.sheets['symbols']
-        ws.range("1:1").clear_contents()
-        
-        headers = [
-            'Symbol', 'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
-            'RSI', 'StochRSI', 'SMA Stoch', 'BB Upper', 'BB Middle', 'BB Lower',
-            'BUY', 'SELL', 'Signal', 'Last Update',
-            'Date', 'Open', 'High', 'Low', 'Close', 'Volume',
-            'RSI', 'StochRSI', 'SMA Stoch', 'BB Upper', 'BB Middle', 'BB Lower',
-            'BUY', 'SELL', 'Signal'
-        ]
-        
-        for col_idx, header in enumerate(headers, start=1):
-            cell = ws.range((1, col_idx))
-            cell.value = header
-            
-            if header in ['BUY', 'SELL', 'Signal']:
-                cell.color = (255, 100, 100)
-            elif col_idx >= 18:
-                cell.color = (146, 96, 54)
-            else:
-                cell.color = (54, 96, 146)
-            cell.font.color = (255, 255, 255)
-            cell.font.bold = True
-        
-        ws.range('A:AF').column_width = 12
-        ws.range('A:A').column_width = 20
-
-        return True
-    except Exception as e:
-        print(f"Error: {e}")
-        return False
-
-# ============================================
-# READ SYMBOLS
-# ============================================
-
-def read_symbols_from_excel():
-    try:
-        ws = excel_name.sheets['symbols']
-        symbols_data = ws.range("A2:A200").value
-        symbols = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
-        
-        cleaned = []
-        seen = set()
-        for s in symbols:
-            s_str = s.upper()
-            if s_str.startswith('NSE:'):
-                s_str = s_str[4:]
-            if not s_str.endswith('-EQ'):
-                s_str = f"{s_str}-EQ"
-            if s_str not in seen:
-                seen.add(s_str)
-                cleaned.append(s_str)
-        return cleaned
-    except Exception:
-        return []
-
-# ============================================
 # MAIN EXCEL LOOP
 # ============================================
 
 def start_excel_loop():
     global last_symbol_check, tick_count
     
-    print("✓ Starting REAL-TIME DAILY TIMEFRAME update loop...")
-    print(f"📊 Indicators calculated using DAILY closes (matches TradingView)")
-    print("   ⏰ Real-time updates during market hours\n")
+    print("\n🚀 Trading System Running...")
+    print(f"   📊 LIVE DATA (Columns {Config.LIVE_START}-{LIVE_END}) - {LIVE_COUNT} columns")
+    print(f"   📋 ORDERS (Columns {Config.ORDER_START}-{ORDER_END}) - {ORDER_COUNT} columns")
+    print(f"   📜 HISTORICAL DATA (Columns {Config.HIST_START}-{HIST_END}) - {HIST_COUNT} columns")
+    print(f"   ⚡ Auto signals in live columns BUY/SELL/Signal\n")
     
     update_count = 0
     last_status = time.time()
@@ -694,6 +1033,8 @@ def start_excel_loop():
                 check_new_symbols()
                 last_symbol_check = current
             
+            check_order_signals()
+            
             update_excel_bulk()
             
             update_count += 1
@@ -705,7 +1046,7 @@ def start_excel_loop():
             
             if current - last_status >= 10:
                 active = sum(1 for d in live_data.values() if d.get('ltp', 0) > 0)
-                print(f"📈 Active: {active}/{len(symbol_tokens)} | Ticks: {tick_count}")
+                print(f"📊 Active: {active}/{len(symbol_tokens)} | Ticks: {tick_count}")
                 tick_count = 0
                 last_status = current
             
@@ -722,7 +1063,7 @@ def main():
     global historical_data_cache
     
     print("\n" + "="*80)
-    print("🚀 DAILY TIMEFRAME - MATCH TRADINGVIEW")
+    print("🚀 DAILY TIMEFRAME - TRADINGVIEW MATCH")
     print("="*80)
     
     print("\n[1/4] Setting up Excel...")
@@ -748,7 +1089,6 @@ def main():
     
     print(f"\n[4/4] Loading historical data...")
     for i, symbol in enumerate(symbols, 1):
-        print(f"   [{i:2}/{len(symbols)}] {symbol}...", end=" ")
         token = GetToken("NSE", symbol)
         if token:
             tk = f"NSE|{token}"
@@ -774,7 +1114,6 @@ def main():
             
             if hist_data:
                 historical_data_cache[symbol] = hist_data
-                # Set initial indicator values from historical
                 live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
                 live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
                 live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
@@ -785,11 +1124,11 @@ def main():
                 live_data[tk]['prev_bb_upper'] = hist_data['yesterday']['prev_bb_upper']
                 live_data[tk]['prev_bb_lower'] = hist_data['yesterday']['prev_bb_lower']
                 live_data[tk]['prev_sma_stoch'] = hist_data['yesterday']['prev_sma_stoch']
-                print(f"✓ ({len(hist_data['all_closes'])} days)")
+                print(f"   [{i:2}/{len(symbols)}] ✓ {symbol}")
             else:
-                print(f"⚠️ No data")
+                print(f"   [{i:2}/{len(symbols)}] ✗ {symbol}")
         else:
-            print(f"✗ FAILED")
+            print(f"   [{i:2}/{len(symbols)}] ✗ {symbol}")
         time.sleep(0.03)
     
     print(f"\n✅ Initialized {len(symbol_tokens)} symbols")
@@ -814,13 +1153,8 @@ def main():
             time.sleep(1)
         
         if feed_opened:
-            print("✅ WebSocket connected!")
             if symbol_tokens:
                 subscribe_symbols(list(symbol_tokens.values()))
-            print("\n🚀 Running DAILY TIMEFRAME indicators...")
-            print("   ✅ Indicators calculated using daily closes")
-            print("   ✅ Matches TradingView daily chart")
-            print("   ✅ Real-time updates during market hours\n")
             start_excel_loop()
         else:
             print("❌ WebSocket failed!")
