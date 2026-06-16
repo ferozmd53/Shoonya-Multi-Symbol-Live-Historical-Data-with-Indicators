@@ -39,7 +39,7 @@ class Config:
     STO_LOWER = 30
     EXCEL_UPDATE_INTERVAL = 1
     LOAD_DAYS = 500
-    KEEP_DAYS = 100
+    KEEP_DAYS = 500
 
 # ====================================================================
 # API CLASS
