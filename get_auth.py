@@ -7,6 +7,7 @@ import pyotp
 import time
 import xlwings as xw
 import requests
+from pathlib import Path
 
 def get_auth_code():
     """Function to get authentication code"""
@@ -14,8 +15,17 @@ def get_auth_code():
     print("SHOONYA AUTHENTICATION")
     print("="*60)
     
-    wb = xw.Book("symbols.xlsx")
-    ws = wb.sheets["LOGIN"]
+    workbook_path = Path(__file__).resolve().with_name("PythonTrader_Terminal_LMT.xlsm")
+    wb = xw.Book(str(workbook_path))
+    try:
+        ws = wb.sheets["LOGIN"]
+    except Exception:
+        ws = wb.sheets.add("LOGIN")
+        ws.range("A1:B11").value = [
+            ["Field", "Value"], ["CLIENT_ID", ""], ["USER_ID", ""],
+            ["PASSWORD", ""], ["TOTP_SECRET", ""], ["API_SECRET", ""],
+            ["AUTH_CODE", ""], ["", ""], ["", ""], ["", ""], ["IP_ADDRESS", ""],
+        ]
     
     CLIENT_ID = ws.range("B2").value
     USER_ID = ws.range("B3").value
