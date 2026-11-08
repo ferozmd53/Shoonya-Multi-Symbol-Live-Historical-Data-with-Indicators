@@ -11,6 +11,7 @@ import pandas as pd
 import string
 import warnings
 from pathlib import Path
+import sys
 from instrument_master import InstrumentMaster, SUPPORTED_EXCHANGES
 warnings.filterwarnings('ignore')
 
@@ -18,7 +19,30 @@ warnings.filterwarnings('ignore')
 # GLOBAL VARIABLES
 # ============================================
 
-WORKBOOK_PATH = Path(__file__).resolve().with_name("PythonTrader_Terminal_LMT.xlsm")
+# Locate the workbook beside run.py / in the working folder first.
+# The installed package may live in Python\\Lib\\site-packages, so do not
+# assume the workbook is stored beside this module.
+WORKBOOK_NAME = "PythonTrader_Terminal_LMT.xlsm"
+RUN_FOLDER = Path(sys.argv[0]).resolve().parent if sys.argv and sys.argv[0] else Path.cwd()
+PACKAGE_FOLDER = Path(__file__).resolve().parent
+
+_workbook_candidates = [
+    RUN_FOLDER / WORKBOOK_NAME,
+    RUN_FOLDER / "CLASS_VII" / WORKBOOK_NAME,
+    Path.cwd() / WORKBOOK_NAME,
+    Path.cwd() / "CLASS_VII" / WORKBOOK_NAME,
+    PACKAGE_FOLDER / WORKBOOK_NAME,
+]
+
+WORKBOOK_PATH = next((p for p in _workbook_candidates if p.is_file()), None)
+if WORKBOOK_PATH is None:
+    searched = "\\n".join(f"  - {p}" for p in _workbook_candidates)
+    raise FileNotFoundError(
+        f"Excel workbook '{WORKBOOK_NAME}' was not found. Searched:\\n{searched}\\n"
+        "Place the workbook beside run.py or in the CLASS_VII folder."
+    )
+
+print(f"📘 Excel workbook: {WORKBOOK_PATH}")
 excel_name = xw.Book(str(WORKBOOK_PATH))
 
 def _ensure_sheet(sheet_name):
