@@ -27,6 +27,13 @@ def get_auth_code():
             ["AUTH_CODE", ""], ["", ""], ["", ""], ["", ""], ["IP_ADDRESS", ""],
         ]
     
+    if not ws.range("A1").value:
+        ws.range("A1:B11").value = [
+            ["Field", "Value"], ["CLIENT_ID", ""], ["USER_ID", ""],
+            ["PASSWORD", ""], ["TOTP_SECRET", ""], ["API_SECRET", ""],
+            ["AUTH_CODE", ""], ["", ""], ["", ""], ["", ""], ["IP_ADDRESS", ""],
+        ]
+
     CLIENT_ID = ws.range("B2").value
     USER_ID = ws.range("B3").value
     PASSWORD = ws.range("B4").value

@@ -25,7 +25,16 @@ def _ensure_sheet(sheet_name):
     try:
         return excel_name.sheets[sheet_name]
     except Exception:
-        return excel_name.sheets.add(sheet_name)
+        sheet = excel_name.sheets.add(sheet_name)
+        if sheet_name == "LOGIN":
+            sheet.range("A1:B11").value = [
+                ["Field", "Value"], ["CLIENT_ID", ""], ["USER_ID", ""],
+                ["PASSWORD", ""], ["TOTP_SECRET", ""], ["API_SECRET", ""],
+                ["AUTH_CODE", ""], ["", ""], ["", ""], ["", ""], ["IP_ADDRESS", ""],
+            ]
+        elif sheet_name == "symbols":
+            sheet.range("A1").value = "Symbol"
+        return sheet
 
 _ensure_sheet("LOGIN")
 _ensure_sheet("symbols")
@@ -1148,9 +1157,10 @@ def main():
                 live_data[tk]['prev_sma_stoch'] = hist_data['yesterday']['prev_sma_stoch']
                 print(f"   [{i:2}/{len(symbols)}] ✓ {symbol}")
             else:
-                print(f"   [{i:2}/{len(symbols)}] ✗ {symbol}")
+                status = "live token loaded; historical indicators are NSE-only" if exchange != "NSE" else "historical data unavailable"
+                print(f"   [{i:2}/{len(symbols)}] ✓ {symbol} ({status})")
         else:
-            print(f"   [{i:2}/{len(symbols)}] ✗ {symbol}")
+            print(f"   [{i:2}/{len(symbols)}] ✗ {symbol} (token not found)")
         time.sleep(0.03)
     
     print(f"\n✅ Initialized {len(symbol_tokens)} symbols")
