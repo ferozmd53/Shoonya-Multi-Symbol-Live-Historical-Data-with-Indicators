@@ -3,6 +3,8 @@
 # This software is for educational and research purposes only.
 ## Installation
 ```bash
+C:\Python314\python.exe -m pip uninstall Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators -y
+C:\Python314\python.exe -m pip install --no-cache-dir --force-reinstall git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git
 pip uninstall Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators -y
 pip install git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git
 pip install NorenRestApiOAuth
