@@ -9,6 +9,7 @@ using live funds.
 ### Option A — Python 3.13 or older
 
 ```bash
+pip install --upgrade --force-reinstall --no-cache-dir --no-deps git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git
 pip install git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git
 ```
 
