@@ -1,8 +1,10 @@
-# get_auth.py — FIXED
-# • Workbook finder searches Desktop, OneDrive, Documents, CWD, script dir
-# • Fills fields by Shoonya's known IDs (lgnusrid / lgnpwd / lgnotp)
-# • 3-second pause between fields
-# • Closes Chrome after auth
+# get_auth.py
+# Location: C:\Python315\Lib\site-packages\get_auth.py
+# Fixes applied:
+#   • line 19 workbook path — searches Desktop / OneDrive / Documents / CWD
+#   • fills by Shoonya field IDs (lgnusrid / lgnpwd / lgnotp), not by index
+#   • 3-second pause after each field
+#   • Chrome closes after auth
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -25,7 +27,6 @@ WORKBOOK_NAME        = "PythonTrader_Terminal_LMT.xlsm"
 
 
 def _find_workbook():
-    """Search all common locations for the workbook."""
     home = Path(os.path.expanduser("~"))
     candidates = [
         home / "Desktop" / WORKBOOK_NAME,
@@ -46,6 +47,7 @@ def _find_workbook():
                 return c
         except (OSError, ValueError):
             continue
+
     raise FileNotFoundError(
         f"Cannot find {WORKBOOK_NAME}. Searched:\n  "
         + "\n  ".join(str(c) for c in candidates)
@@ -53,9 +55,11 @@ def _find_workbook():
 
 
 def get_auth_code():
+    """Function to get authentication code"""
     print("=" * 60)
     print("SHOONYA AUTHENTICATION")
     print("=" * 60)
+    print(f"get_auth.py loaded from: {os.path.abspath(__file__)}")
 
     workbook_path = _find_workbook()
     print(f"📘 Excel workbook: {workbook_path}")
@@ -99,7 +103,6 @@ def get_auth_code():
         f"?api_key={CLIENT_ID}&route_to={USER_ID}"
     )
 
-    # ── Launch Chrome ──
     options = Options()
     options.add_argument("--start-maximized")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -115,7 +118,6 @@ def get_auth_code():
         driver.get(login_url)
         time.sleep(3)
 
-        # ── Fill by ID (Shoonya-specific, reliable) ──
         def fill_by_id(element_id, value, label):
             el = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, element_id))
@@ -138,7 +140,6 @@ def get_auth_code():
         print(f"     ⏳ pausing {INPUT_FILL_DELAY_SEC:.0f}s...")
         time.sleep(INPUT_FILL_DELAY_SEC)
 
-        # ── Click LOGIN ──
         print("Clicking LOGIN...")
         clicked = False
         for b in driver.find_elements(By.TAG_NAME, "button"):
@@ -153,7 +154,6 @@ def get_auth_code():
         if not clicked:
             print("  ⚠️ LOGIN button not found")
 
-        # ── Wait for auth code in URL ──
         print("Waiting for OAuth redirect (up to 3 min)...")
         deadline = time.time() + 180
         while time.time() < deadline:
@@ -164,7 +164,7 @@ def get_auth_code():
                         code = url.split(sep, 1)[1].split("&")[0].split("#")[0]
                         ws.range("B7").value = code
                         wb.save()
-                        print(f"\n✅ AUTH CODE saved to LOGIN!B7: {code[:20]}...")
+                        print(f"\n✅ AUTH CODE saved to LOGIN!B7")
                         return code
             time.sleep(0.5)
 
