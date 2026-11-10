@@ -7,6 +7,9 @@ build/
 .vscode/
 .idea/
 *.xlsx
+*.xlsm
+*.txt
+!requirements.txt
 
 # Shoonya instrument master cache (downloaded automatically)
 Instrument/
