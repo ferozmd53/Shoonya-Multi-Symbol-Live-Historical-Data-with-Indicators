@@ -1,6 +1,47 @@
 # Extreme_Reversal_Signal.py - FIXED DATA POSITIONS
-from NorenRestApiOAuth.NorenApi import NorenApi
-from NorenRestApiPy.NorenApi import NorenApi
+# Extreme_Reversal_Signal.py - FIXED DATA POSITIONS
+
+# ─── NorenApi import with automatic fallback ───
+# Prefers NorenRestApiOAuth (has getAccessToken).
+# Falls back to NorenRestApiPy + a runtime shim if OAuth package is missing.
+try:
+    from NorenRestApiOAuth.NorenApi import NorenApi
+    if not hasattr(NorenApi, "getAccessToken"):
+        raise ImportError("getAccessToken missing")
+except Exception:
+    try:
+        from NorenRestApiPy.NorenApi import NorenApi as _BaseNorenApi
+        import requests as _req
+
+        class NorenApi(_BaseNorenApi):
+            """NorenRestApiPy NorenApi with getAccessToken injected."""
+            def getAccessToken(self, auth_code, secret_key, client_id, uid):
+                url = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
+                data = {"uid": uid, "code": auth_code,
+                        "secret": secret_key, "client_id": client_id,
+                        "source": "API"}
+                r = _req.post(url, data=data, timeout=30)
+                ret = r.json()
+                if ret.get("stat") == "Ok":
+                    self._NorenApi__access_token = ret["access_token"]
+                    self._NorenApi__username     = ret["uid"]
+                    self._NorenApi__accountid    = ret.get("actid")
+                    return (ret["access_token"], ret["uid"],
+                            ret.get("refresh_token"), ret.get("actid"))
+                print(f"❌ getAccessToken failed: {ret}")
+                return None
+
+            def injectOAuthHeader(self, token, uid, actid=None):
+                self._NorenApi__access_token = token
+                self._NorenApi__username     = uid
+                self._NorenApi__accountid    = actid
+    except ImportError:
+        raise ImportError(
+            "Install one of:\n"
+            "  pip install --no-cache-dir --no-deps NorenRestApiOAuth\n"
+            "  pip install --no-cache-dir --no-deps NorenRestApiPy"
+        )
+
 import time
 import datetime
 from datetime import datetime, timedelta
