@@ -1,40 +1,66 @@
 # Extreme_Reversal_Signal.py - FIXED DATA POSITIONS
-# Extreme_Reversal_Signal.py - FIXED DATA POSITIONS
 
 # ─── NorenApi import with automatic fallback ───
-# Prefers NorenRestApiOAuth (has getAccessToken).
-# Falls back to NorenRestApiPy + a runtime shim if OAuth package is missing.
+# Prefers NorenRestApiOAuth (real package — has correct getAccessToken).
+# Falls back to NorenRestApiPy + a jData-wrapping shim if OAuth pkg is missing.
 try:
     from NorenRestApiOAuth.NorenApi import NorenApi
     if not hasattr(NorenApi, "getAccessToken"):
         raise ImportError("getAccessToken missing")
+    print("✅ Using NorenRestApiOAuth (real package)")
 except Exception:
     try:
         from NorenRestApiPy.NorenApi import NorenApi as _BaseNorenApi
         import requests as _req
+        import json as _json
 
         class NorenApi(_BaseNorenApi):
-            """NorenRestApiPy NorenApi with getAccessToken injected."""
+            """NorenRestApiPy NorenApi with jData-wrapped getAccessToken injected."""
             def getAccessToken(self, auth_code, secret_key, client_id, uid):
                 url = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
-                data = {"uid": uid, "code": auth_code,
-                        "secret": secret_key, "client_id": client_id,
-                        "source": "API"}
-                r = _req.post(url, data=data, timeout=30)
-                ret = r.json()
+                inner = {
+                    "uid":       uid,
+                    "code":      auth_code,
+                    "secret":    secret_key,
+                    "client_id": client_id,
+                }
+                # ── Shoonya's GenAcsTok expects jData wrapper ──
+                payload = {"jData": _json.dumps(inner)}
+                try:
+                    r = _req.post(url, data=payload, timeout=30)
+                    ret = r.json()
+                except Exception as e:
+                    print(f"❌ getAccessToken HTTP error: {e}")
+                    return None
+
                 if ret.get("stat") == "Ok":
-                    self._NorenApi__access_token = ret["access_token"]
-                    self._NorenApi__username     = ret["uid"]
-                    self._NorenApi__accountid    = ret.get("actid")
+                    try:
+                        self._NorenApi__access_token = ret["access_token"]
+                        self._NorenApi__username     = ret["uid"]
+                        self._NorenApi__accountid    = ret.get("actid")
+                    except Exception:
+                        pass
+                    self.access_token = ret["access_token"]
+                    self.username     = ret["uid"]
+                    self.accountid    = ret.get("actid")
+                    print(f"✅ getAccessToken OK (uid={ret['uid']})")
                     return (ret["access_token"], ret["uid"],
                             ret.get("refresh_token"), ret.get("actid"))
                 print(f"❌ getAccessToken failed: {ret}")
                 return None
 
             def injectOAuthHeader(self, token, uid, actid=None):
-                self._NorenApi__access_token = token
-                self._NorenApi__username     = uid
-                self._NorenApi__accountid    = actid
+                try:
+                    self._NorenApi__access_token = token
+                    self._NorenApi__username     = uid
+                    self._NorenApi__accountid    = actid
+                except Exception:
+                    pass
+                self.access_token = token
+                self.username     = uid
+                self.accountid    = actid
+        print("⚠️  Using NorenRestApiPy with jData-wrapped shim")
+        print("   For the real package: pip install --no-cache-dir --no-deps NorenRestApiOAuth")
     except ImportError:
         raise ImportError(
             "Install one of:\n"
@@ -44,6 +70,7 @@ except Exception:
 
 import time
 import datetime
+from datetime import datetime, timedelta
 from datetime import datetime, timedelta
 import numpy as np
 import json
