@@ -1,5 +1,5 @@
 # Extreme_Reversal_Signal.py - FIXED DATA POSITIONS
-
+from NorenRestApiOAuth.NorenApi import NorenApi
 from NorenRestApiPy.NorenApi import NorenApi
 import time
 import datetime
