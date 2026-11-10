@@ -7,6 +7,10 @@ Educational and research software for Shoonya API users. Trading involves financ
 Use the OAuth SDK build (do not install the legacy `NorenRestApiPy` package separately):
 
 ```bash
+pip uninstall NorenRestApiPy -y
+pip uninstall NorenRestApiOAuth -y
+pip install --no-binary :all: PyYAML
+pip install NorenRestApiOAuth
 python -m pip uninstall NorenRestApiPy -y
 python -m pip install --upgrade git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git
 ```
