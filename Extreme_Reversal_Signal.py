@@ -1,8 +1,9 @@
 # Extreme_Reversal_Signal.py - FIXED DATA POSITIONS
 
 # ─── NorenApi import with automatic fallback ───
-# Prefers NorenRestApiOAuth (real package — has correct getAccessToken).
-# Falls back to NorenRestApiPy + a jData-wrapping shim if OAuth pkg is missing.
+# Prefers NorenRestApiOAuth (real package — correctly formats jData).
+# Falls back to NorenRestApiPy + a shim that mimics NorenRestApiOAuth's
+# raw-string jData payload (NOT a URL-encoded dict).
 try:
     from NorenRestApiOAuth.NorenApi import NorenApi
     if not hasattr(NorenApi, "getAccessToken"):
@@ -15,7 +16,8 @@ except Exception:
         import json as _json
 
         class NorenApi(_BaseNorenApi):
-            """NorenRestApiPy NorenApi with jData-wrapped getAccessToken injected."""
+            """NorenRestApiPy with getAccessToken that mimics NorenRestApiOAuth exactly."""
+
             def getAccessToken(self, auth_code, secret_key, client_id, uid):
                 url = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
                 inner = {
@@ -23,9 +25,14 @@ except Exception:
                     "code":      auth_code,
                     "secret":    secret_key,
                     "client_id": client_id,
+                    "source":    "API",
                 }
-                # ── Shoonya's GenAcsTok expects jData wrapper ──
-                payload = {"jData": _json.dumps(inner)}
+
+                # ── CRITICAL: send 'jData=<raw-json>' as a STRING, not a dict.
+                #    A dict would be URL-encoded by requests (e.g. %7B%22uid%22...),
+                #    which Shoonya rejects with "jData is not valid json object".
+                payload = "jData=" + _json.dumps(inner)
+
                 try:
                     r = _req.post(url, data=payload, timeout=30)
                     ret = r.json()
@@ -46,6 +53,7 @@ except Exception:
                     print(f"✅ getAccessToken OK (uid={ret['uid']})")
                     return (ret["access_token"], ret["uid"],
                             ret.get("refresh_token"), ret.get("actid"))
+
                 print(f"❌ getAccessToken failed: {ret}")
                 return None
 
@@ -59,7 +67,9 @@ except Exception:
                 self.access_token = token
                 self.username     = uid
                 self.accountid    = actid
-        print("⚠️  Using NorenRestApiPy with jData-wrapped shim")
+                print(f"✅ injectOAuthHeader OK (uid={uid})")
+
+        print("⚠️  Using NorenRestApiPy with jData-raw-string shim")
         print("   For the real package: pip install --no-cache-dir --no-deps NorenRestApiOAuth")
     except ImportError:
         raise ImportError(
@@ -70,7 +80,6 @@ except Exception:
 
 import time
 import datetime
-from datetime import datetime, timedelta
 from datetime import datetime, timedelta
 import numpy as np
 import json
