@@ -1,4 +1,7 @@
-NorenRestApiOAuth>=0.0.41
+# Core API (pure-Python — installs on any Python version, no compiler needed)
+NorenRestApiPy>=0.0.22
+
+# Excel / data / auth helpers
 xlwings>=0.30.0
 numpy>=1.24.0
 pandas>=2.0.0
@@ -6,3 +9,7 @@ openpyxl>=3.1.0
 requests>=2.31.0
 pyotp>=2.9.0
 websocket-client>=1.8.0
+
+# OPTIONAL — uncomment ONLY if you have MSVC Build Tools installed,
+# or a PyYAML wheel is available for your Python version:
+# NorenRestApiOAuth>=0.0.41
