@@ -10,13 +10,59 @@ import xlwings as xw
 import pandas as pd
 import string
 import warnings
+from pathlib import Path
+import sys
+from instrument_master import InstrumentMaster, SUPPORTED_EXCHANGES
 warnings.filterwarnings('ignore')
 
 # ============================================
 # GLOBAL VARIABLES
 # ============================================
 
-excel_name = xw.Book('symbols.xlsx')
+# Locate the workbook beside run.py / in the working folder first.
+# The installed package may live in Python\\Lib\\site-packages, so do not
+# assume the workbook is stored beside this module.
+WORKBOOK_NAME = "PythonTrader_Terminal_LMT.xlsm"
+RUN_FOLDER = Path(sys.argv[0]).resolve().parent if sys.argv and sys.argv[0] else Path.cwd()
+PACKAGE_FOLDER = Path(__file__).resolve().parent
+
+_workbook_candidates = [
+    RUN_FOLDER / WORKBOOK_NAME,
+    RUN_FOLDER / "CLASS_VII" / WORKBOOK_NAME,
+    Path.cwd() / WORKBOOK_NAME,
+    Path.cwd() / "CLASS_VII" / WORKBOOK_NAME,
+    PACKAGE_FOLDER / WORKBOOK_NAME,
+]
+
+WORKBOOK_PATH = next((p for p in _workbook_candidates if p.is_file()), None)
+if WORKBOOK_PATH is None:
+    searched = "\\n".join(f"  - {p}" for p in _workbook_candidates)
+    raise FileNotFoundError(
+        f"Excel workbook '{WORKBOOK_NAME}' was not found. Searched:\\n{searched}\\n"
+        "Place the workbook beside run.py or in the CLASS_VII folder."
+    )
+
+print(f"📘 Excel workbook: {WORKBOOK_PATH}")
+excel_name = xw.Book(str(WORKBOOK_PATH))
+
+def _ensure_sheet(sheet_name):
+    try:
+        return excel_name.sheets[sheet_name]
+    except Exception:
+        sheet = excel_name.sheets.add(sheet_name)
+        if sheet_name == "LOGIN":
+            sheet.range("A1:B11").value = [
+                ["Field", "Value"], ["CLIENT_ID", ""], ["USER_ID", ""],
+                ["PASSWORD", ""], ["TOTP_SECRET", ""], ["API_SECRET", ""],
+                ["AUTH_CODE", ""], ["", ""], ["", ""], ["", ""], ["IP_ADDRESS", ""],
+            ]
+        elif sheet_name == "symbols":
+            sheet.range("A1").value = "Symbol"
+        return sheet
+
+_ensure_sheet("LOGIN")
+_ensure_sheet("symbols")
+instrument_master = InstrumentMaster()
 api = None
 feed_opened = False
 live_data = {}
@@ -175,9 +221,7 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C'):
             return None
             
         tk = symbol_tokens[symbol]
-        exchange = tk.split('|')[0]
-        
-        tradingsymbol = symbol
+        exchange, tradingsymbol = parse_symbol_input(symbol)
         
         print(f"📊 Placing {buy_sell} order: {qty} shares of {symbol}")
         
@@ -433,18 +477,32 @@ def Shoonya_login():
 # GET TOKEN
 # ============================================
 
+def parse_symbol_input(value):
+    """Accept EXCHANGE:TRADINGSYMBOL; plain symbols default to NSE equity."""
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return "NSE", ""
+    if ":" in raw:
+        exchange, trading_symbol = raw.split(":", 1)
+    elif "|" in raw:
+        exchange, trading_symbol = raw.split("|", 1)
+    else:
+        exchange, trading_symbol = "NSE", raw
+    exchange, trading_symbol = exchange.strip().upper(), trading_symbol.strip().upper()
+    if exchange not in SUPPORTED_EXCHANGES:
+        raise ValueError(f"Unsupported exchange {exchange}; use {', '.join(SUPPORTED_EXCHANGES)}")
+    if exchange == "NSE" and trading_symbol not in ("NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","INDIAVIX") and not trading_symbol.endswith("-EQ"):
+        trading_symbol += "-EQ"
+    return exchange, trading_symbol
+
+
+def normalized_symbol_key(value):
+    exchange, trading_symbol = parse_symbol_input(value)
+    return f"{exchange}:{trading_symbol}" if trading_symbol else ""
+
+
 def GetToken(exchange, tradingsymbol):
-    try:
-        search = tradingsymbol.replace('-EQ', '').strip()
-        result = api.searchscrip(exchange=exchange, searchtext=search)
-        if result and result.get('values'):
-            for item in result['values']:
-                tsym = item.get('tsym', '').upper()
-                if tsym in [tradingsymbol.upper(), search.upper()]:
-                    return item.get('token')
-            return result['values'][0].get('token')
-    except Exception as e:
-        return None
+    return instrument_master.get_token(exchange, tradingsymbol, api=api)
 
 # ============================================
 # CHECK ORDER SIGNALS FROM EXCEL
@@ -473,12 +531,11 @@ def check_order_signals():
                 continue
             
             row_num = idx + 2
-            symbol = str(symbol_cell).strip().upper()
-            if symbol.startswith('NSE:'):
-                symbol = symbol[4:]
-            if not symbol.endswith('-EQ'):
-                symbol = f"{symbol}-EQ"
-            
+            try:
+                symbol = normalized_symbol_key(symbol_cell)
+            except ValueError as exc:
+                print(f"Skipping symbol in row {row_num}: {exc}")
+                continue
             if symbol not in symbol_tokens:
                 continue
             
@@ -694,12 +751,10 @@ def update_excel_bulk():
             if not symbol_cell:
                 continue
             row_num = idx + 2
-            symbol = str(symbol_cell).strip().upper()
-            if symbol.startswith('NSE:'):
-                symbol = symbol[4:]
-            if not symbol.endswith('-EQ'):
-                symbol = f"{symbol}-EQ"
-            
+            try:
+                symbol = normalized_symbol_key(symbol_cell)
+            except ValueError:
+                continue
             qty = ws.range(f"{qty_col}{row_num}").value
             buy_trigger = ws.range(f"{buy_trigger_col}{row_num}").value
             buy_status = ws.range(f"{buy_status_col}{row_num}").value
@@ -721,12 +776,11 @@ def update_excel_bulk():
                 rows.append([''] * len(ALL_COLS))
                 continue
             
-            symbol = str(symbol_cell).strip().upper()
-            if symbol.startswith('NSE:'):
-                symbol = symbol[4:]
-            if not symbol.endswith('-EQ'):
-                symbol = f"{symbol}-EQ"
-            
+            try:
+                symbol = normalized_symbol_key(symbol_cell)
+            except ValueError:
+                rows.append([''] * len(ALL_COLS))
+                continue
             tk = symbol_tokens.get(symbol)
             hist = historical_data_cache.get(symbol)
             hist_yesterday = hist['yesterday'] if hist else {}
@@ -917,18 +971,16 @@ def read_symbols_from_excel():
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value
         symbols = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
-        
-        cleaned = []
-        seen = set()
-        for s in symbols:
-            s_str = s.upper()
-            if s_str.startswith('NSE:'):
-                s_str = s_str[4:]
-            if not s_str.endswith('-EQ'):
-                s_str = f"{s_str}-EQ"
-            if s_str not in seen:
-                seen.add(s_str)
-                cleaned.append(s_str)
+        cleaned, seen = [], set()
+        for raw_symbol in symbols:
+            try:
+                key = normalized_symbol_key(raw_symbol)
+            except ValueError as exc:
+                print(f"Skipping symbol '{raw_symbol}': {exc}")
+                continue
+            if key and key not in seen:
+                seen.add(key)
+                cleaned.append(key)
         return cleaned
     except Exception:
         return []
@@ -944,16 +996,14 @@ def check_new_symbols():
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}100").value
         current = [str(s).strip().upper() for s in symbols_data if s] if symbols_data else []
-        
         cleaned = []
-        for s in current:
-            s_str = s.upper()
-            if s_str.startswith('NSE:'):
-                s_str = s_str[4:]
-            if not s_str.endswith('-EQ'):
-                s_str = f"{s_str}-EQ"
-            cleaned.append(s_str)
-        
+        for raw_symbol in current:
+            try:
+                key = normalized_symbol_key(raw_symbol)
+                if key:
+                    cleaned.append(key)
+            except ValueError as exc:
+                print(f"Skipping symbol '{raw_symbol}': {exc}")
         new_symbols = [s for s in cleaned if s not in symbol_tokens]
         
         if new_symbols:
@@ -961,13 +1011,13 @@ def check_new_symbols():
             new_tokens = []
             for symbol in new_symbols:
                 try:
-                    token = GetToken("NSE", symbol)
+                    exchange, trading_symbol = parse_symbol_input(symbol)
+                    token = GetToken(exchange, trading_symbol)
                     if token:
-                        tk = f"NSE|{token}"
+                        tk = f"{exchange}|{token}"
                         symbol_tokens[symbol] = tk
-                        token_symbols[token] = symbol
-                        
-                        hist_data = fetch_historical_data(symbol)
+                        token_symbols[tk] = symbol
+                        hist_data = fetch_historical_data(trading_symbol) if exchange == "NSE" else None
                         
                         live_data[tk] = {
                             'symbol': symbol,
@@ -1066,19 +1116,23 @@ def main():
     print("🚀 DAILY TIMEFRAME - TRADINGVIEW MATCH")
     print("="*80)
     
-    print("\n[1/4] Setting up Excel...")
+    print("\n[1/5] Setting up Excel...")
     setup_excel_headers()
     
-    print("\n[2/4] Logging to Shoonya...")
+    print("\n[2/5] Logging to Shoonya...")
     if not Shoonya_login():
         print("❌ Login failed!")
         return
     
-    print("\n[3/4] Reading symbols...")
+    print("\n[3/5] Loading Shoonya instrument masters...")
+    loaded_exchanges = instrument_master.load(SUPPORTED_EXCHANGES, force_refresh=True)
+    print(f"Instrument masters ready: {', '.join(loaded_exchanges) if loaded_exchanges else 'none; searchscrip fallback enabled'}")
+
+    print("\n[4/5] Reading symbols...")
     symbols = read_symbols_from_excel()
     
     if not symbols:
-        default = ["RELIANCE-EQ", "TCS-EQ", "INFY-EQ"]
+        default = ["NSE:RELIANCE-EQ", "NSE:TCS-EQ", "NSE:INFY-EQ"]
         for i, sym in enumerate(default, start=2):
             excel_name.sheets['symbols'].range(f"A{i}").value = sym
         excel_name.save()
@@ -1087,15 +1141,16 @@ def main():
     
     print(f"📋 Processing {len(symbols)} symbols...")
     
-    print(f"\n[4/4] Loading historical data...")
+    print(f"\n[5/5] Loading tokens and historical data...")
     for i, symbol in enumerate(symbols, 1):
-        token = GetToken("NSE", symbol)
+        exchange, trading_symbol = parse_symbol_input(symbol)
+        token = GetToken(exchange, trading_symbol)
         if token:
-            tk = f"NSE|{token}"
+            tk = f"{exchange}|{token}"
             symbol_tokens[symbol] = tk
-            token_symbols[token] = symbol
-            
-            hist_data = fetch_historical_data(symbol)
+            token_symbols[tk] = symbol
+            # Keep the original indicator/history calculations for NSE symbols.
+            hist_data = fetch_historical_data(trading_symbol) if exchange == "NSE" else None
             
             live_data[tk] = {
                 'symbol': symbol,
@@ -1126,9 +1181,10 @@ def main():
                 live_data[tk]['prev_sma_stoch'] = hist_data['yesterday']['prev_sma_stoch']
                 print(f"   [{i:2}/{len(symbols)}] ✓ {symbol}")
             else:
-                print(f"   [{i:2}/{len(symbols)}] ✗ {symbol}")
+                status = "live token loaded; historical indicators are NSE-only" if exchange != "NSE" else "historical data unavailable"
+                print(f"   [{i:2}/{len(symbols)}] ✓ {symbol} ({status})")
         else:
-            print(f"   [{i:2}/{len(symbols)}] ✗ {symbol}")
+            print(f"   [{i:2}/{len(symbols)}] ✗ {symbol} (token not found)")
         time.sleep(0.03)
     
     print(f"\n✅ Initialized {len(symbol_tokens)} symbols")
