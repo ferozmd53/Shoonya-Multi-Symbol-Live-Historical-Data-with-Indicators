@@ -14,45 +14,55 @@ except Exception:
         from NorenRestApiPy.NorenApi import NorenApi as _BaseNorenApi
         import requests as _req
         import json as _json
+        import hashlib as _hashlib
 
         class NorenApi(_BaseNorenApi):
             """NorenRestApiPy with getAccessToken that mimics NorenRestApiOAuth exactly."""
 
             def getAccessToken(self, auth_code, secret_key, client_id, uid):
-                url = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
-                inner = {
-                    "uid":       uid,
-                    "code":      auth_code,
-                    "secret":    secret_key,
-                    "client_id": client_id,
-                    "source":    "API",
-                }
-
-                # ── CRITICAL: send 'jData=<raw-json>' as a STRING, not a dict.
-                #    A dict would be URL-encoded by requests (e.g. %7B%22uid%22...),
-                #    which Shoonya rejects with "jData is not valid json object".
-                payload = "jData=" + _json.dumps(inner)
-
-                try:
-                    r = _req.post(url, data=payload, timeout=30)
-                    ret = r.json()
-                except Exception as e:
-                    print(f"❌ getAccessToken HTTP error: {e}")
+                """Exchange a fresh Shoonya OAuth code using the required SHA256 checksum."""
+                if not all(str(v or "").strip() for v in (auth_code, secret_key, client_id, uid)):
+                    print("❌ OAuth exchange stopped: auth code or API credentials are blank")
                     return None
 
-                if ret.get("stat") == "Ok":
+                url = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
+                checksum = _hashlib.sha256(
+                    (str(client_id).strip() + str(secret_key).strip() + str(auth_code).strip()).encode("utf-8")
+                ).hexdigest()
+                payload = "jData=" + _json.dumps({
+                    "code": str(auth_code).strip(),
+                    "checksum": checksum,
+                })
+
+                try:
+                    response = _req.post(
+                        url,
+                        data=payload,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        timeout=30,
+                    )
+                    ret = response.json()
+                except Exception as exc:
+                    print(f"❌ getAccessToken HTTP error: {exc}")
+                    return None
+
+                if ret.get("stat") == "Ok" and (ret.get("access_token") or ret.get("susertoken")):
+                    access_token = ret.get("access_token") or ret.get("susertoken")
+                    returned_uid = ret.get("uid") or ret.get("USERID") or uid
+                    actid = ret.get("actid")
+                    refresh_token = ret.get("refresh_token")
                     try:
-                        self._NorenApi__access_token = ret["access_token"]
-                        self._NorenApi__username     = ret["uid"]
-                        self._NorenApi__accountid    = ret.get("actid")
+                        self._NorenApi__access_token = access_token
+                        self._NorenApi__username = returned_uid
+                        self._NorenApi__accountid = actid
+                        self._NorenApi__susertoken = ret.get("susertoken", access_token)
                     except Exception:
                         pass
-                    self.access_token = ret["access_token"]
-                    self.username     = ret["uid"]
-                    self.accountid    = ret.get("actid")
-                    print(f"✅ getAccessToken OK (uid={ret['uid']})")
-                    return (ret["access_token"], ret["uid"],
-                            ret.get("refresh_token"), ret.get("actid"))
+                    self.access_token = access_token
+                    self.username = returned_uid
+                    self.accountid = actid
+                    print(f"✅ getAccessToken OK (uid={returned_uid})")
+                    return (access_token, returned_uid, refresh_token, actid)
 
                 print(f"❌ getAccessToken failed: {ret}")
                 return None
