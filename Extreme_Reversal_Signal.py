@@ -335,8 +335,8 @@ def get_order_headers():
     """R:AB order panel. BUY and SELL each have trigger, product, DONE, status and order number."""
     return [
         'Quantity',
-        'BUY', 'BUY Type', 'BUY DONE', 'BUY Status', 'BUY Order No',
-        'SELL', 'SELL Type', 'SELL DONE', 'SELL Status', 'SELL Order No'
+        'BUY', 'BUY Type', ' ', 'BUY Broker Status', 'BUY Order No',
+        'SELL', 'SELL Type', ' ', 'SELL Broker Status', 'SELL Order No'
     ]
 
 # ============================================
@@ -455,7 +455,7 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
 
         if not algo_id:
             print("❌ Algo ID / Client ID is blank in LOGIN!B2")
-            return {"stat": "Not_Ok", "emsg": "Algo ID / Client ID is blank in LOGIN!B2"}
+            return {"local_error": True, "emsg": "Algo ID / Client ID is blank in LOGIN!B2"}
         algo_id = str(algo_id).strip()
 
         order_params = {
@@ -500,7 +500,7 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
 
     except Exception as e:
         print(f"❌ Error placing order: {e}")
-        return {"stat": "Not_Ok", "emsg": str(e)}
+        return {"local_error": True, "emsg": str(e)}
 
 
 # ============================================
@@ -814,14 +814,14 @@ def _submit_order_worker(symbol, qty, side, product_code, algo_id):
     try:
         return place_order(symbol, qty, side, price=0, product_type=product_code, algo_id=algo_id)
     except Exception as exc:
-        return {"stat": "Not_Ok", "emsg": str(exc)}
+        return {"local_error": True, "emsg": str(exc)}
 
 
 def _order_worker_done(future, key, row_num, side, done_col, status_col, order_col, trigger_col):
     try:
         result = future.result()
     except Exception as exc:
-        result = {"stat": "Not_Ok", "emsg": str(exc)}
+        result = {"local_error": True, "emsg": str(exc)}
     order_result_queue.put({
         "key": key, "row": row_num, "side": side, "done_col": done_col,
         "status_col": status_col, "order_col": order_col,
@@ -830,7 +830,7 @@ def _order_worker_done(future, key, row_num, side, done_col, status_col, order_c
 
 
 def process_order_results():
-    """Main Excel thread applies worker results; broker REST latency never blocks LTP updates."""
+    """Write only broker-returned order numbers and broker statuses to Excel."""
     ws = excel_name.sheets['symbols']
     while True:
         try:
@@ -840,46 +840,56 @@ def process_order_results():
         key = item["key"]
         try:
             result = item["result"]
-            if isinstance(result, dict) and result.get("norenordno"):
+            if not isinstance(result, dict):
+                print(f"❌ {item['side']} {key[0]}: no broker response; no broker status written.")
+                continue
+
+            if result.get("norenordno"):
                 order_no = normalize_order_no(result["norenordno"])
                 ws.range(f"{item['order_col']}{item['row']}").value = order_no
-                ws.range(f"{item['status_col']}{item['row']}").value = normalize_order_status(result.get("status") or "PENDING")
-                ws.range(f"{item['done_col']}{item['row']}").value = "DONE"
-                print(f"✅ {item['side']} order accepted for {key[0]}. Order No: {order_no}")
+                broker_status = result.get("status") or result.get("order_status")
+                if broker_status:
+                    ws.range(f"{item['status_col']}{item['row']}").value = normalize_order_status(broker_status)
+                print(f"📋 Broker response for {item['side']} {key[0]}: "
+                      f"{broker_status or 'Order number received'} | {order_no}")
+            elif result.get("local_error"):
+                print(f"⚠️ Local submission error for {item['side']} {key[0]}: "
+                      f"{result.get('emsg', 'Unknown error')}")
+            elif str(result.get("stat", "")).lower() in ("not_ok", "not ok") and result.get("emsg"):
+                # Shoonya's explicit Not_Ok response is a broker rejection.
+                ws.range(f"{item['status_col']}{item['row']}").value = (
+                    "REJECTED | " + str(result["emsg"])
+                )
+                print(f"📋 Broker rejected {item['side']} {key[0]}: {result['emsg']}")
             else:
-                message = (result or {}).get("emsg") or (result or {}).get("message") or str(result or "No broker response")
-                ws.range(f"{item['status_col']}{item['row']}").value = f"REJECTED | {message}"
-                ws.range(f"{item['done_col']}{item['row']}").value = "FAILED"
-                print(f"❌ {item['side']} order failed for {key[0]}: {message}")
+                print(f"⚠️ No broker order number/status for {item['side']} {key[0]}: {result}")
         except Exception as exc:
-            print(f"Excel order-result update error for {key}: {exc}")
+            print(f"Excel broker-result write error for {key}: {exc}")
         finally:
             with order_inflight_lock:
                 order_inflight.discard(key)
 
-
 def reconcile_order_statuses():
-    """Run order-book polling in the background; only the main thread touches Excel."""
+    """Fetch broker order book asynchronously; apply only broker-reported statuses."""
     global last_order_reconcile, order_reconcile_future
     now = time.time()
     if order_reconcile_future is not None and order_reconcile_future.done():
         try:
             orders = order_reconcile_future.result()
             if isinstance(orders, list):
-                tracked = {}
                 ws = excel_name.sheets['symbols']
                 symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
-                for idx, symbol_cell in enumerate(symbols_data):
-                    if not symbol_cell:
-                        continue
+                panel = ws.range("R2:AB200").value or []
+                tracked = {}
+                for idx, row in enumerate(panel):
+                    row = list(row) if isinstance(row, (list, tuple)) else [row]
+                    row += [""] * (11 - len(row))
                     row_num = idx + 2
-                    for order_col, status_col in (
-                        (ORDER_COLS[5], ORDER_COLS[4]),
-                        (ORDER_COLS[10], ORDER_COLS[9])
-                    ):
-                        order_no = normalize_order_no(ws.range(f"{order_col}{row_num}").value)
+                    for order_index, status_index in ((5, 4), (10, 9)):
+                        order_no = normalize_order_no(row[order_index])
                         if order_no:
-                            tracked[order_no] = (row_num, status_col, order_col)
+                            tracked[order_no] = (row_num, ORDER_COLS[status_index], ORDER_COLS[order_index],
+                                                 str(row[status_index] or ""))
                 for broker_order in orders:
                     if not isinstance(broker_order, dict):
                         continue
@@ -887,18 +897,20 @@ def reconcile_order_statuses():
                     target = tracked.get(order_no)
                     if not target:
                         continue
-                    row_num, status_col, order_col = target
+                    row_num, status_col, order_col, old_status = target
+                    broker_status = broker_order.get('status') or broker_order.get('order_status')
+                    if not broker_status:
+                        continue
                     new_status = order_status_text(broker_order)
-                    old_status = str(ws.range(f"{status_col}{row_num}").value or '').upper()
                     old_base = normalize_order_status(old_status.split('|')[0].strip()) if old_status else ''
-                    new_base = normalize_order_status(broker_order.get('status') or 'PENDING')
+                    new_base = normalize_order_status(broker_status)
                     final_states = ('COMPLETE', 'REJECTED', 'CANCELED')
                     if old_base in final_states and new_base not in final_states:
                         continue
-                    ws.range(f"{order_col}{row_num}").value = order_no
-                    ws.range(f"{status_col}{row_num}").value = new_status
+                    if new_status != old_status:
+                        ws.range(f"{status_col}{row_num}").value = new_status
         except Exception as exc:
-            print(f"Order status reconciliation error: {exc}")
+            print(f"Broker order-book read/apply error: {exc}")
         finally:
             order_reconcile_future = None
 
@@ -906,19 +918,12 @@ def reconcile_order_statuses():
         last_order_reconcile = now
         order_reconcile_future = order_executor.submit(api.get_order_book)
 
-
 def check_order_signals():
-    """Read order inputs on Excel thread and dispatch independent background submissions."""
+    """Bulk-scan manual inputs; submit independently per symbol without Excel-side flags."""
     try:
         ws = excel_name.sheets['symbols']
-        symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value
-        if not symbols_data:
-            return
-
-        (qty_col, buy_trigger_col, buy_type_col, buy_done_col, buy_status_col,
-         buy_order_col, sell_trigger_col, sell_type_col, sell_done_col,
-         sell_status_col, sell_order_col) = ORDER_COLS
-
+        symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
+        panel = ws.range("R2:AB200").value or []
         login_sheet = excel_name.sheets['LOGIN']
         algo_id_value = login_sheet.range('B2').value
         algo_id = str(algo_id_value).strip() if algo_id_value else ''
@@ -928,7 +933,6 @@ def check_order_signals():
         for idx, symbol_cell in enumerate(symbols_data):
             if not symbol_cell:
                 continue
-            row_num = idx + 2
             try:
                 symbol = normalized_symbol_key(symbol_cell)
             except ValueError:
@@ -936,29 +940,28 @@ def check_order_signals():
             if symbol not in symbol_tokens:
                 continue
 
-            qty_cell = ws.range(f"{qty_col}{row_num}").value
+            row = panel[idx] if idx < len(panel) else []
+            row = list(row) if isinstance(row, (list, tuple)) else [row]
+            row += [""] * (11 - len(row))
             try:
-                qty = max(1, int(float(qty_cell))) if qty_cell not in ('', None) else 1
+                qty = max(1, int(float(row[0]))) if row[0] not in ('', None) else 1
             except Exception:
                 qty = 1
 
-            for side, trigger_col, type_col, done_col, status_col, order_col in (
-                ("BUY", buy_trigger_col, buy_type_col, buy_done_col, buy_status_col, buy_order_col),
-                ("SELL", sell_trigger_col, sell_type_col, sell_done_col, sell_status_col, sell_order_col)
+            for side, trigger_index, type_index, status_index, order_index in (
+                ("BUY", 1, 2, 4, 5),
+                ("SELL", 6, 7, 9, 10)
             ):
-                trigger = str(ws.range(f"{trigger_col}{row_num}").value or '').strip().upper()
-                done = str(ws.range(f"{done_col}{row_num}").value or '').strip().upper()
-                status = str(ws.range(f"{status_col}{row_num}").value or '').strip()
-                order_no = normalize_order_no(ws.range(f"{order_col}{row_num}").value)
-                if trigger != side or done or status or order_no:
+                trigger = str(row[trigger_index] or '').strip().upper()
+                broker_status = str(row[status_index] or '').strip()
+                order_no = normalize_order_no(row[order_index])
+                if trigger != side or broker_status or order_no:
                     continue
 
-                product_text = str(ws.range(f"{type_col}{row_num}").value or '').strip().upper()
-                product_map = {"CNC": "C", "MIS": "I"}
-                product_code = product_map.get(product_text)
+                product_text = str(row[type_index] or '').strip().upper()
+                product_code = {"CNC": "C", "MIS": "I"}.get(product_text)
                 if not product_code:
-                    ws.range(f"{status_col}{row_num}").value = "INPUT ERROR | Set type to CNC or MIS"
-                    ws.range(f"{done_col}{row_num}").value = "FAILED"
+                    print(f"⚠️ {symbol} {side}: select CNC or MIS in Excel; no order sent.")
                     continue
 
                 key = (symbol, side)
@@ -967,16 +970,24 @@ def check_order_signals():
                         continue
                     order_inflight.add(key)
 
-                ws.range(f"{status_col}{row_num}").value = "SUBMITTING"
-                print(f"\n🔔 {side} signal detected for {symbol} (Qty: {qty}, Product: {product_text})")
-                future = order_executor.submit(_submit_order_worker, symbol, qty, side, product_code, algo_id)
-                future.add_done_callback(
-                    lambda f, k=key, r=row_num, sd=side, dc=done_col, sc=status_col,
-                           oc=order_col, tc=trigger_col:
-                    _order_worker_done(f, k, r, sd, dc, sc, oc, tc)
-                )
+                status_col = ORDER_COLS[4 if side == "BUY" else 9]
+                order_col = ORDER_COLS[5 if side == "BUY" else 10]
+                print(f"🔔 Sending {side} request for {symbol} (Qty: {qty}, Product: {product_text})")
+                try:
+                    future = order_executor.submit(
+                        _submit_order_worker, symbol, qty, side, product_code, algo_id
+                    )
+                    future.add_done_callback(
+                        lambda f, k=key, r=idx + 2, sd=side, sc=status_col, oc=order_col:
+                        _order_worker_done(f, k, r, sd, "", sc, oc, "")
+                    )
+                except Exception:
+                    with order_inflight_lock:
+                        order_inflight.discard(key)
+                    raise
     except Exception as exc:
-        print(f"Order signal scan error: {exc}")
+        print(f"Order input scan error: {exc}")
+
 
 # ============================================
 # WEBSOCKET CALLBACKS
