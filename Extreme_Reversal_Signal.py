@@ -493,7 +493,7 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C'):
 
     except Exception as e:
         print(f"❌ Error placing order: {e}")
-        return None
+        return {"stat": "Not_Ok", "emsg": str(e)}
 
 
 # ============================================
@@ -725,6 +725,8 @@ def normalize_order_status(value):
     raw = str(value or 'PENDING').strip().upper().replace(' ', '_')
     mapping = {
         'OPEN': 'OPEN', 'PENDING': 'PENDING', 'WAITING': 'PENDING',
+        'NEW': 'PENDING', 'SUBMITTED': 'PENDING',
+        'MODIFY_PENDING': 'PENDING', 'CANCEL_PENDING': 'PENDING',
         'TRIGGER_PENDING': 'OPEN', 'COMPLETE': 'COMPLETE',
         'COMPLETED': 'COMPLETE', 'REJECTED': 'REJECTED',
         'CANCELED': 'CANCELED', 'CANCELLED': 'CANCELED',
