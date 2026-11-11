@@ -1602,7 +1602,7 @@ def start_excel_loop():
     print(f"   📜 HISTORICAL DATA (Columns {Config.HIST_START}-{HIST_END}) - {HIST_COUNT} columns")
     print(f"   ⚡ Auto signals in live columns BUY/SELL/Signal\n")
     
-    update_count = 0
+    last_save = time.time()
     last_status = time.time()
     
     while True:
@@ -1621,12 +1621,14 @@ def start_excel_loop():
 
             update_excel_bulk()
             
-            update_count += 1
-            if update_count % 30 == 0:
+            # Saving the workbook on every 30 loop passes caused frequent Excel stalls.
+            # Persist live workbook changes on a slower interval instead.
+            if current - last_save >= 30:
                 try:
                     excel_name.save()
-                except:
+                except Exception:
                     pass
+                last_save = current
             
             if current - last_status >= 10:
                 active = sum(1 for d in live_data.values() if d.get('ltp', 0) > 0)
