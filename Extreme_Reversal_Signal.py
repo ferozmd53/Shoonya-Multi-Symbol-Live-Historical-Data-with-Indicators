@@ -276,6 +276,9 @@ pending_order_updates = []
 order_update_lock = threading.Lock()
 order_result_queue = queue.Queue()
 order_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="ShoonyaOrder")
+indicator_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ShoonyaIndicators")
+indicator_inflight = set()
+indicator_inflight_lock = threading.Lock()
 order_inflight = set()
 order_inflight_lock = threading.Lock()
 order_reconcile_future = None
@@ -283,6 +286,8 @@ last_order_reconcile = 0
 tick_count = 0
 last_symbol_check = 0
 last_excel_update = 0
+last_indicator_excel_update = 0
+last_hist_excel_update = 0
 
 # ============================================
 # COLUMN UTILITY FUNCTIONS
@@ -350,7 +355,9 @@ class Config:
     STOCH_LENGTH = 14
     STOCH_UPPER = 70
     STOCH_LOWER = 30
-    EXCEL_UPDATE_INTERVAL = 0.1
+    EXCEL_UPDATE_INTERVAL = 0.1          # Raw LTP/OHLCV refresh
+    INDICATOR_EXCEL_UPDATE_INTERVAL = 0.5
+    HIST_EXCEL_UPDATE_INTERVAL = 5.0
     LOAD_DAYS = 500
     KEEP_DAYS = 500
     
@@ -653,37 +660,27 @@ def _validate_cached_shoonya_session(test_api):
     """Validate a restored access token with a harmless authenticated account request."""
     try:
         if not hasattr(test_api, "get_limits"):
+            print("⚠️ Cached token cannot be checked: get_limits() is unavailable.")
             return False
         response = test_api.get_limits()
-        return isinstance(response, dict) and str(response.get("stat", "")).strip().lower() == "ok"
+        if isinstance(response, dict) and str(response.get("stat", "")).strip().lower() == "ok":
+            return True
+        print(f"⚠️ Shoonya did not validate the cached token: {response}")
+        return False
     except Exception as exc:
         print(f"Cached Shoonya session validation failed: {exc}")
         return False
 
 
-def _validate_cached_shoonya_session(test_api):
-    """Validate a restored access token with a harmless authenticated account request."""
-    try:
-        if not hasattr(test_api, "get_limits"):
-            return False
-        response = test_api.get_limits()
-        return isinstance(response, dict) and str(response.get("stat", "")).strip().lower() == "ok"
-    except Exception as exc:
-        print(f"Cached Shoonya session validation failed: {exc}")
-        return False
-
-
-def Shoonya_login():
+def Shoonya_login(auth_code_provider=None):
+    """Reuse a valid saved OAuth token; open the browser only when a fresh code is needed."""
     global api
     try:
         login_sheet = excel_name.sheets['LOGIN']
         session_sheet = _ensure_sheet("SESSION")
-
         client_id_value = login_sheet.range('B2').value
         userid_value = login_sheet.range('B3').value
         secret_value = login_sheet.range('B6').value
-        auth_value = login_sheet.range('B7').value
-
         if not userid_value or not secret_value:
             print("❌ LOGIN sheet is missing USER_ID (B3) or API_SECRET (B6).")
             return 0
@@ -691,9 +688,6 @@ def Shoonya_login():
         userid = str(userid_value).strip()
         secret = str(secret_value).strip()
         client_id = str(client_id_value).strip() if client_id_value else f"{userid}_U"
-
-        # Prefer the user's LOGIN sheet fields; fall back to the earlier SESSION sheet
-        # so an existing installation does not lose its already-saved valid session.
         cached_token = login_sheet.range('B9').value or session_sheet.range('B1').value
         cached_created_epoch = login_sheet.range('B12').value
         cached_created_iso = session_sheet.range('B3').value
@@ -705,69 +699,80 @@ def Shoonya_login():
             if cached_created_epoch not in (None, ""):
                 age_seconds = time.time() - float(cached_created_epoch)
             elif cached_created_iso:
-                if isinstance(cached_created_iso, datetime):
-                    created_at = cached_created_iso
-                else:
-                    created_at = datetime.fromisoformat(str(cached_created_iso).strip())
+                created_at = cached_created_iso if isinstance(cached_created_iso, datetime) else datetime.fromisoformat(str(cached_created_iso).strip())
                 age_seconds = (datetime.now() - created_at).total_seconds()
-        except Exception:
-            age_seconds = -1
+        except Exception as exc:
+            print(f"⚠️ Could not read saved OAuth token creation time: {exc}")
 
         if cached_token and 0 <= age_seconds < (23 * 60 * 60 + 50 * 60):
             if not cached_uid or str(cached_uid).strip() == userid:
-                api = ShoonyaApiPy()
-                api.injectOAuthHeader(
-                    str(cached_token).strip(),
-                    userid,
-                    str(cached_actid or userid).strip()
-                )
-                if _validate_cached_shoonya_session(api):
-                    # Keep the visible LOGIN fields and legacy SESSION sheet in sync.
-                    login_sheet.range('B8').value = str(cached_token)
-                    login_sheet.range('B9').value = str(cached_token)
-                    login_sheet.range('B13').value = str(cached_actid or userid)
-                    session_sheet.range('B1').value = str(cached_token)
-                    session_sheet.range('B3').value = datetime.fromtimestamp(
-                        float(cached_created_epoch), tz=datetime.now().astimezone().tzinfo
-                    ).replace(tzinfo=None).isoformat(timespec="seconds") if cached_created_epoch not in (None, "") else cached_created_iso
-                    session_sheet.range('B4').value = str(cached_actid or userid)
-                    session_sheet.range('B6').value = userid
-                    print("✅ Reusing valid Shoonya OAuth session. No new OAuth code required.")
-                    return 1
-                print("⚠️ Saved Shoonya token is no longer accepted. Requesting fresh OAuth login.")
+                try:
+                    candidate_api = ShoonyaApiPy()
+                    candidate_api.injectOAuthHeader(str(cached_token).strip(), userid, str(cached_actid or userid).strip())
+                    if _validate_cached_shoonya_session(candidate_api):
+                        api = candidate_api
+                        login_sheet.range('B8').value = str(cached_token)
+                        login_sheet.range('B9').value = str(cached_token)
+                        login_sheet.range('B13').value = str(cached_actid or userid)
+                        session_sheet.range('B1').value = str(cached_token)
+                        if cached_created_epoch not in (None, ""):
+                            session_sheet.range('B3').value = datetime.fromtimestamp(float(cached_created_epoch)).isoformat(timespec="seconds")
+                        else:
+                            session_sheet.range('B3').value = cached_created_iso
+                        session_sheet.range('B4').value = str(cached_actid or userid)
+                        session_sheet.range('B6').value = userid
+                        print("✅ Reusing valid Shoonya OAuth session. Browser will not open.")
+                        return 1
+                except Exception as exc:
+                    print(f"⚠️ Could not restore cached Shoonya session: {exc}")
             else:
                 print("⚠️ Saved session belongs to a different USER_ID; not reusing it.")
+        elif cached_token:
+            print("ℹ️ Saved Shoonya token is expired or its saved creation time is invalid.")
 
-        auth = str(auth_value).strip() if auth_value else ""
+        auth = str(login_sheet.range('B7').value or "").strip()
+
+        def obtain_fresh_code():
+            if not callable(auth_code_provider):
+                return ""
+            print("🌐 No valid saved Shoonya session. Starting browser OAuth now.")
+            code = str(auth_code_provider() or "").strip()
+            if code:
+                login_sheet.range('B7').value = code
+                excel_name.save()
+            return code
+
         if not auth:
-            print("❌ No valid saved Shoonya session and LOGIN!B7 auth is blank. Generate a fresh OAuth code.")
+            auth = obtain_fresh_code()
+        if not auth:
+            print("❌ No usable saved session or OAuth code was obtained.")
             return 0
 
         api = ShoonyaApiPy()
         result = api.getAccessToken(auth, secret, client_id, userid)
+        if not result and callable(auth_code_provider):
+            print("⚠️ Saved AUTH code was rejected. Requesting one fresh OAuth code and retrying.")
+            login_sheet.range('B7').value = ""
+            auth = obtain_fresh_code()
+            if auth:
+                api = ShoonyaApiPy()
+                result = api.getAccessToken(auth, secret, client_id, userid)
         if not result:
-            print("❌ OAuth code exchange failed. Enter a fresh auth code in LOGIN!B7.")
+            print("❌ OAuth code exchange failed. No access token was returned.")
             return 0
 
         acc_tok, response_uid, ref_tok, actid = result
         if not acc_tok:
             print("❌ Shoonya did not return an access token.")
             return 0
-
         api.injectOAuthHeader(acc_tok, userid, actid or userid)
         created_epoch = int(time.time())
         created_iso = datetime.now().isoformat(timespec="seconds")
-
-        # Exact LOGIN sheet layout supplied by the user:
-        # B8 user_token, B9 token, B12 session epoch, B13 account, B14 refresh token.
         login_sheet.range('B8').value = str(acc_tok)
         login_sheet.range('B9').value = str(acc_tok)
         login_sheet.range('B12').value = created_epoch
         login_sheet.range('B13').value = str(actid or userid)
         login_sheet.range('B14').value = str(ref_tok) if ref_tok else ""
-
-        # Mirror the existing SESSION sheet for backward compatibility with the
-        # WebSocket and any other code that already reads its B1:B6 layout.
         session_sheet.range('B1').value = str(acc_tok)
         session_sheet.range('B3').value = created_iso
         session_sheet.range('B4').value = str(actid or userid)
@@ -781,16 +786,15 @@ def Shoonya_login():
             session_sheet.visible = False
         except Exception:
             pass
-
-        # Authorization codes are single-use; clear only after successful exchange.
         login_sheet.range('B7').value = ""
         excel_name.save()
-        print("✅ New Shoonya OAuth session saved in LOGIN and SESSION sheets.")
+        print("✅ New Shoonya OAuth session saved for reuse.")
         return 1
-
     except Exception as exc:
         print(f"Login error: {exc}")
         return 0
+
+
 # ============================================
 # GET TOKEN
 # ============================================
@@ -1120,115 +1124,120 @@ def check_order_signals():
 # WEBSOCKET CALLBACKS
 # ============================================
 
+def _calculate_live_indicators(symbol, ltp):
+    """Run the existing RSI/Stoch RSI/Bollinger calculations away from the tick callback."""
+    hist = historical_data_cache.get(symbol)
+    if not hist:
+        return None
+    all_closes = hist['all_closes'].copy()
+    all_closes.append(ltp)
+    df = pd.DataFrame({'close': all_closes})
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    alpha = 1.0 / Config.RSI_LENGTH
+    avg_gain = gain.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
+    avg_loss = loss.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
+    rs = avg_gain / avg_loss
+    rsi = (100 - (100 / (1 + rs))).fillna(50)
+    rsi_low = rsi.rolling(Config.STOCH_LENGTH).min()
+    rsi_high = rsi.rolling(Config.STOCH_LENGTH).max()
+    stoch = (100 * (rsi - rsi_low) / (rsi_high - rsi_low)).fillna(50)
+    sma_stoch = stoch.rolling(3).mean()
+    sma = df['close'].rolling(Config.BB_LENGTH).mean()
+    stdev = df['close'].rolling(Config.BB_LENGTH).std(ddof=0)
+    bb_upper = sma + (Config.BB_STD * stdev)
+    bb_lower = sma - (Config.BB_STD * stdev)
+    latest_rsi = rsi.iloc[-1] if len(rsi) else 50
+    latest_stoch = stoch.iloc[-1] if len(stoch) else 50
+    latest_sma_stoch = sma_stoch.iloc[-1] if len(sma_stoch) else 50
+    latest_bb_upper = bb_upper.iloc[-1] if len(bb_upper) else 0
+    latest_bb_middle = sma.iloc[-1] if len(sma) else 0
+    latest_bb_lower = bb_lower.iloc[-1] if len(bb_lower) else 0
+    prev_bb_upper = bb_upper.iloc[-2] if len(bb_upper) >= 2 else latest_bb_upper
+    prev_bb_lower = bb_lower.iloc[-2] if len(bb_lower) >= 2 else latest_bb_lower
+    prev_close = all_closes[-2] if len(all_closes) >= 2 else ltp
+    prev_sma_stoch = sma_stoch.iloc[-2] if len(sma_stoch) >= 2 else latest_sma_stoch
+    buy_signal = prev_close < prev_bb_lower and ltp > latest_bb_lower and prev_sma_stoch < Config.STOCH_LOWER
+    sell_signal = prev_close > prev_bb_upper and ltp < latest_bb_upper and prev_sma_stoch > Config.STOCH_UPPER
+    return {
+        'rsi': round(latest_rsi, 2), 'stoch_rsi': round(latest_stoch, 2),
+        'sma_stoch': round(latest_sma_stoch, 2), 'bb_upper': round(latest_bb_upper, 2),
+        'bb_middle': round(latest_bb_middle, 2), 'bb_lower': round(latest_bb_lower, 2),
+        'prev_close': prev_close, 'prev_bb_upper': prev_bb_upper,
+        'prev_bb_lower': prev_bb_lower, 'prev_sma_stoch': prev_sma_stoch,
+        'buy': 1 if buy_signal else '', 'sell': 1 if sell_signal else '',
+        'signal': 'BUY' if buy_signal else ('SELL' if sell_signal else '')
+    }
+
+
+def _indicator_worker_done(future, token_key):
+    try:
+        values = future.result()
+        if values and token_key in live_data:
+            live_data[token_key].update(values)
+    except Exception as exc:
+        print(f"⚠️ Indicator calculation failed for {token_key}: {exc}")
+    finally:
+        with indicator_inflight_lock:
+            indicator_inflight.discard(token_key)
+
+
+def process_indicator_updates():
+    """Schedule indicator calculations separately so WebSocket LTP/OHLCV stays lightweight."""
+    for token_key, data in list(live_data.items()):
+        if not data.get('indicator_dirty') or data.get('ltp', 0) <= 0:
+            continue
+        symbol = data.get('symbol')
+        if not symbol or symbol not in historical_data_cache:
+            data['indicator_dirty'] = False
+            continue
+        with indicator_inflight_lock:
+            if token_key in indicator_inflight:
+                continue
+            indicator_inflight.add(token_key)
+            data['indicator_dirty'] = False
+        try:
+            future = indicator_executor.submit(_calculate_live_indicators, symbol, data.get('ltp', 0))
+            future.add_done_callback(lambda f, key=token_key: _indicator_worker_done(f, key))
+        except Exception as exc:
+            with indicator_inflight_lock:
+                indicator_inflight.discard(token_key)
+            data['indicator_dirty'] = True
+            print(f"⚠️ Could not schedule indicators for {token_key}: {exc}")
+
+
 def on_ticks(tick):
+    """Update raw market fields immediately; indicator work runs in separate workers."""
     global live_data, tick_count
-    
     try:
         if isinstance(tick, str):
             tick = json.loads(tick)
-        
         tick_count += 1
-        
         key = f"{tick['e']}|{tick['tk']}"
-        
-        if key in live_data:
-            d = live_data[key]
-            ltp = safe_float(tick.get('lp', d.get('ltp', 0)))
-            volume = safe_int(tick.get('v', d.get('volume', 0)))
-            open_price = safe_float(tick.get('o', d.get('open', 0)))
-            
-            symbol = d['symbol']
-            
-            if d.get('first_tick', True):
-                d['first_tick'] = False
-                d['open'] = open_price if open_price > 0 else ltp
-                d['high'] = ltp
-                d['low'] = ltp
-            
-            if ltp > d.get('high', 0):
-                d['high'] = ltp
-            if ltp < d.get('low', 999999):
-                d['low'] = ltp
-            
-            d['ltp'] = ltp
-            d['volume'] = volume
-            d['timestamp'] = datetime.now()
-            d['close'] = ltp
-            
-            hist = historical_data_cache.get(symbol)
-            
-            if hist:
-                all_closes = hist['all_closes'].copy()
-                all_closes.append(ltp)
-                
-                df = pd.DataFrame({'close': all_closes})
-                
-                delta = df['close'].diff()
-                gain = delta.where(delta > 0, 0.0)
-                loss = -delta.where(delta < 0, 0.0)
-                alpha = 1.0 / Config.RSI_LENGTH
-                avg_gain = gain.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
-                avg_loss = loss.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
-                rs = avg_gain / avg_loss
-                rsi = 100 - (100 / (1 + rs))
-                rsi = rsi.fillna(50)
-                
-                rsi_low = rsi.rolling(Config.STOCH_LENGTH).min()
-                rsi_high = rsi.rolling(Config.STOCH_LENGTH).max()
-                stoch = 100 * (rsi - rsi_low) / (rsi_high - rsi_low)
-                stoch = stoch.fillna(50)
-                sma_stoch = stoch.rolling(3).mean()
-                
-                sma = df['close'].rolling(Config.BB_LENGTH).mean()
-                stdev = df['close'].rolling(Config.BB_LENGTH).std(ddof=0)
-                bb_upper = sma + (Config.BB_STD * stdev)
-                bb_lower = sma - (Config.BB_STD * stdev)
-                
-                latest_rsi = rsi.iloc[-1] if len(rsi) > 0 else 50
-                latest_stoch = stoch.iloc[-1] if len(stoch) > 0 else 50
-                latest_sma_stoch = sma_stoch.iloc[-1] if len(sma_stoch) > 0 else 50
-                latest_bb_upper = bb_upper.iloc[-1] if len(bb_upper) > 0 else 0
-                latest_bb_middle = sma.iloc[-1] if len(sma) > 0 else 0
-                latest_bb_lower = bb_lower.iloc[-1] if len(bb_lower) > 0 else 0
-                
-                prev_bb_upper = bb_upper.iloc[-2] if len(bb_upper) >= 2 else latest_bb_upper
-                prev_bb_lower = bb_lower.iloc[-2] if len(bb_lower) >= 2 else latest_bb_lower
-                prev_close = all_closes[-2] if len(all_closes) >= 2 else ltp
-                prev_sma_stoch = sma_stoch.iloc[-2] if len(sma_stoch) >= 2 else latest_sma_stoch
-                
-                d['rsi'] = round(latest_rsi, 2)
-                d['stoch_rsi'] = round(latest_stoch, 2)
-                d['sma_stoch'] = round(latest_sma_stoch, 2)
-                d['bb_upper'] = round(latest_bb_upper, 2)
-                d['bb_middle'] = round(latest_bb_middle, 2)
-                d['bb_lower'] = round(latest_bb_lower, 2)
-                d['prev_close'] = prev_close
-                d['prev_bb_upper'] = prev_bb_upper
-                d['prev_bb_lower'] = prev_bb_lower
-                d['prev_sma_stoch'] = prev_sma_stoch
-                
-                buy_signal = False
-                sell_signal = False
-                signal = ""
-                
-                if (prev_close < prev_bb_lower and 
-                    ltp > latest_bb_lower and 
-                    prev_sma_stoch < Config.STOCH_LOWER):
-                    buy_signal = True
-                    signal = "BUY"
-                
-                elif (prev_close > prev_bb_upper and 
-                      ltp < latest_bb_upper and 
-                      prev_sma_stoch > Config.STOCH_UPPER):
-                    sell_signal = True
-                    signal = "SELL"
-                
-                d['buy'] = 1 if buy_signal else ''
-                d['sell'] = 1 if sell_signal else ''
-                d['signal'] = signal
-                
-    except Exception as e:
-        pass
+        if key not in live_data:
+            return
+        data = live_data[key]
+        ltp = safe_float(tick.get('lp', data.get('ltp', 0)))
+        volume = safe_int(tick.get('v', data.get('volume', 0)))
+        open_price = safe_float(tick.get('o', data.get('open', 0)))
+        if data.get('first_tick', True):
+            data['first_tick'] = False
+            data['open'] = open_price if open_price > 0 else ltp
+            data['high'] = ltp
+            data['low'] = ltp
+        if ltp > data.get('high', 0):
+            data['high'] = ltp
+        if ltp < data.get('low', 999999):
+            data['low'] = ltp
+        data['ltp'] = ltp
+        data['volume'] = volume
+        data['timestamp'] = datetime.now()
+        data['close'] = ltp
+        data['indicator_dirty'] = True
+    except Exception as exc:
+        print(f"⚠️ WebSocket tick update error: {type(exc).__name__}: {exc}")
+
 
 def on_open():
     global feed_opened
@@ -1264,76 +1273,89 @@ def subscribe_symbols(tokens_list):
 # ============================================
 
 def update_excel_bulk():
-    """Refresh live B:Q and historical AC:AQ only; preserve the order panel R:AB."""
-    global last_excel_update
+    """Refresh raw B:G frequently; refresh indicators H:Q and history AC:AQ separately."""
+    global last_excel_update, last_indicator_excel_update, last_hist_excel_update
     try:
-        current_time = time.time()
-        if current_time - last_excel_update < Config.EXCEL_UPDATE_INTERVAL:
+        now = time.time()
+        raw_due = now - last_excel_update >= Config.EXCEL_UPDATE_INTERVAL
+        indicator_due = now - last_indicator_excel_update >= Config.INDICATOR_EXCEL_UPDATE_INTERVAL
+        hist_due = now - last_hist_excel_update >= Config.HIST_EXCEL_UPDATE_INTERVAL
+        if not (raw_due or indicator_due or hist_due):
             return
-        last_excel_update = current_time
-
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
-        live_rows = []
-        hist_rows = []
-
+        raw_rows, indicator_rows, hist_rows = [], [], []
         for symbol_cell in symbols_data:
             if not symbol_cell:
-                live_rows.append([''] * LIVE_COUNT)
-                hist_rows.append([''] * HIST_COUNT)
+                if raw_due: raw_rows.append([''] * 6)
+                if indicator_due: indicator_rows.append([''] * 10)
+                if hist_due: hist_rows.append([''] * HIST_COUNT)
                 continue
             try:
                 symbol = normalized_symbol_key(symbol_cell)
             except ValueError:
-                live_rows.append([''] * LIVE_COUNT)
-                hist_rows.append([''] * HIST_COUNT)
+                if raw_due: raw_rows.append([''] * 6)
+                if indicator_due: indicator_rows.append([''] * 10)
+                if hist_due: hist_rows.append([''] * HIST_COUNT)
                 continue
-
-            tk = symbol_tokens.get(symbol)
+            token_key = symbol_tokens.get(symbol)
+            data = live_data.get(token_key) if token_key else None
             hist = historical_data_cache.get(symbol)
-            hist_yesterday = hist['yesterday'] if hist else {}
-            if tk and tk in live_data:
-                d = live_data[tk]
-                live_rows.append([
-                    d.get('ltp', 0) if d.get('ltp', 0) > 0 else '',
-                    d.get('open', 0) if d.get('open', 0) > 0 else '',
-                    d.get('high', 0) if d.get('high', 0) > 0 else '',
-                    d.get('low', 0) if d.get('low', 0) > 0 else '',
-                    d.get('close', 0) if d.get('close', 0) > 0 else '',
-                    d.get('volume', 0) if d.get('volume', 0) > 0 else '',
-                    d.get('rsi', ''), d.get('stoch_rsi', ''),
-                    d.get('sma_stoch', ''), d.get('bb_upper', ''),
-                    d.get('bb_middle', ''), d.get('bb_lower', ''),
-                    d.get('buy', ''), d.get('sell', ''), d.get('signal', ''),
-                    d['timestamp'].strftime('%H:%M:%S') if d.get('timestamp') else ''
+            if raw_due:
+                raw_rows.append([
+                    data.get('ltp', 0) if data and data.get('ltp', 0) > 0 else '',
+                    data.get('open', 0) if data and data.get('open', 0) > 0 else '',
+                    data.get('high', 0) if data and data.get('high', 0) > 0 else '',
+                    data.get('low', 0) if data and data.get('low', 0) > 0 else '',
+                    data.get('close', 0) if data and data.get('close', 0) > 0 else '',
+                    data.get('volume', 0) if data and data.get('volume', 0) > 0 else ''
                 ])
-            else:
-                live_rows.append([''] * LIVE_COUNT)
-
-            hist_rows.append([
-                hist_yesterday.get('date', ''), hist_yesterday.get('open', ''),
-                hist_yesterday.get('high', ''), hist_yesterday.get('low', ''),
-                hist_yesterday.get('close', ''), hist_yesterday.get('volume', ''),
-                hist_yesterday.get('rsi', ''), hist_yesterday.get('stoch_rsi', ''),
-                hist_yesterday.get('sma_stoch', ''), hist_yesterday.get('bb_upper', ''),
-                hist_yesterday.get('bb_middle', ''), hist_yesterday.get('bb_lower', ''),
-                hist_yesterday.get('buy', ''), hist_yesterday.get('sell', ''),
-                hist_yesterday.get('signal', '')
-            ])
-
-        if live_rows:
-            last_row = 1 + len(live_rows)
-            # Live B:Q and historical AC:AQ are independent of order inputs R:AB.
-            ws.range(f"{Config.LIVE_START}2:{LIVE_END}{last_row}").value = live_rows
-            ws.range(f"{Config.HIST_START}2:{HIST_END}{last_row}").value = hist_rows
-
-    except Exception as e:
-        print(f"Excel update error: {e}")
+            if indicator_due:
+                if data:
+                    indicator_rows.append([
+                        data.get('rsi', ''), data.get('stoch_rsi', ''),
+                        data.get('sma_stoch', ''), data.get('bb_upper', ''),
+                        data.get('bb_middle', ''), data.get('bb_lower', ''),
+                        data.get('buy', ''), data.get('sell', ''),
+                        data.get('signal', ''),
+                        data['timestamp'].strftime('%H:%M:%S') if data.get('timestamp') else ''
+                    ])
+                else:
+                    indicator_rows.append([''] * 10)
+            if hist_due:
+                yesterday = hist['yesterday'] if hist else {}
+                hist_rows.append([
+                    yesterday.get('date', ''), yesterday.get('open', ''),
+                    yesterday.get('high', ''), yesterday.get('low', ''),
+                    yesterday.get('close', ''), yesterday.get('volume', ''),
+                    yesterday.get('rsi', ''), yesterday.get('stoch_rsi', ''),
+                    yesterday.get('sma_stoch', ''), yesterday.get('bb_upper', ''),
+                    yesterday.get('bb_middle', ''), yesterday.get('bb_lower', ''),
+                    yesterday.get('buy', ''), yesterday.get('sell', ''),
+                    yesterday.get('signal', '')
+                ])
+        if symbols_data:
+            last_row = 1 + len(symbols_data)
+            if raw_due and raw_rows:
+                raw_start = Config.LIVE_START
+                raw_end = get_column_letter(get_column_number(raw_start) + 5)
+                ws.range(f"{raw_start}2:{raw_end}{last_row}").value = raw_rows
+                last_excel_update = now
+            if indicator_due and indicator_rows:
+                indicator_start = get_column_letter(get_column_number(Config.LIVE_START) + 6)
+                ws.range(f"{indicator_start}2:{LIVE_END}{last_row}").value = indicator_rows
+                last_indicator_excel_update = now
+            if hist_due and hist_rows:
+                ws.range(f"{Config.HIST_START}2:{HIST_END}{last_row}").value = hist_rows
+                last_hist_excel_update = now
+    except Exception as exc:
+        print(f"Excel update error: {exc}")
 
 
 # ============================================
 # ONE-TIME WORKBOOK COLUMN MIGRATION
 # ============================================
+
 
 def migrate_legacy_layout(ws):
     """Preserve the previous R:X orders and Y:AM history when expanding orders to R:AB."""
@@ -1516,6 +1538,7 @@ def check_new_symbols():
                             'ltp': 0, 'volume': 0,
                             'open': 0, 'high': 0, 'low': 0, 'close': 0,
                             'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
+                'indicator_dirty': False,
                             'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
                             'buy': '', 'sell': '', 'signal': '',
                             'prev_close': 0,
@@ -1578,6 +1601,7 @@ def start_excel_loop():
             process_order_results()
             reconcile_order_statuses()
             check_order_signals()
+            process_indicator_updates()
 
             update_excel_bulk()
             
@@ -1603,7 +1627,7 @@ def start_excel_loop():
 # MAIN
 # ============================================
 
-def main():
+def main(auth_code_provider=None):
     global historical_data_cache
     
     print("\n" + "="*80)
@@ -1614,7 +1638,7 @@ def main():
     setup_excel_headers()
     
     print("\n[2/5] Logging to Shoonya...")
-    if not Shoonya_login():
+    if not Shoonya_login(auth_code_provider=auth_code_provider):
         print("❌ Login failed!")
         return
     
