@@ -275,7 +275,7 @@ order_history = []
 pending_order_updates = []
 order_update_lock = threading.Lock()
 order_result_queue = queue.Queue()
-order_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ShoonyaOrder")
+order_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="ShoonyaOrder")
 order_inflight = set()
 order_inflight_lock = threading.Lock()
 order_reconcile_future = None
