@@ -1126,7 +1126,7 @@ def subscribe_symbols(tokens_list):
 # ============================================
 
 def update_excel_bulk():
-    """Refresh live and historical data only; never overwrite the order panel R:X."""
+    """Refresh live B:Q and historical AC:AQ only; preserve the order panel R:AB."""
     global last_excel_update
     try:
         current_time = time.time()
