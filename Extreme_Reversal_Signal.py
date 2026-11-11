@@ -1285,6 +1285,9 @@ def setup_excel_headers():
     try:
         ws = excel_name.sheets['symbols']
         migrate_legacy_layout(ws)
+        # U and Z were local DONE flags in the previous version; they are obsolete.
+        ws.range("U2:U200").clear_contents()
+        ws.range("Z2:Z200").clear_contents()
         ws.range("1:1").clear_contents()
         
         # Build headers in correct order: Symbol, LIVE, ORDERS, HISTORICAL
