@@ -77,13 +77,68 @@ except Exception:
                     self._NorenApi__susertoken = token
                     self._NorenApi__access_token = token
                     self._NorenApi__username = uid
-                    self._NorenApi__accountid = actid
+                    self._NorenApi__accountid = actid or uid
+                    self._NorenApi__OAuthHeaders = {
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json; charset=utf-8",
+                    }
                 except Exception:
                     pass
                 self.access_token = token
                 self.username     = uid
-                self.accountid    = actid
+                self.accountid    = actid or uid
                 print(f"✅ injectOAuthHeader OK (uid={uid})")
+
+            def place_order(
+                self, buy_or_sell, product_type, exchange, tradingsymbol,
+                quantity, discloseqty, price_type, price=0.0,
+                trigger_price=None, retention="DAY", amo=None, remarks=None,
+                bookloss_price=0.0, bookprofit_price=0.0, trail_price=0.0,
+                algo_id=None
+            ):
+                """OAuth-compatible PlaceOrder for the legacy NorenRestApiPy fallback."""
+                config = self._NorenApi__service_config
+                url = f"{config['host']}{config['routes']['placeorder']}"
+                values = {
+                    "ordersource": "API",
+                    "uid": self._NorenApi__username,
+                    "actid": self._NorenApi__accountid or self._NorenApi__username,
+                    "trantype": getattr(buy_or_sell, "value", buy_or_sell),
+                    "prd": getattr(product_type, "value", product_type),
+                    "exch": exchange,
+                    "tsym": tradingsymbol,
+                    "qty": str(quantity),
+                    "dscqty": str(discloseqty),
+                    "prctyp": getattr(price_type, "value", price_type),
+                    "prc": str(price),
+                    "trgprc": str(trigger_price if trigger_price is not None else 0),
+                    "ret": retention,
+                    "remarks": remarks,
+                    "algo_id": algo_id,
+                }
+                if amo is not None:
+                    values["amo"] = amo
+                if product_type in ("H", "B"):
+                    values["blprc"] = str(bookloss_price)
+                if product_type == "B":
+                    values["bpprc"] = str(bookprofit_price)
+                if trail_price:
+                    values["trailprc"] = str(trail_price)
+
+                payload = "jData=" + _json.dumps(values)
+                headers = getattr(self, "_NorenApi__OAuthHeaders", None)
+                if headers:
+                    response = _req.post(url, data=payload, headers=headers, timeout=30)
+                else:
+                    token = getattr(self, "_NorenApi__susertoken", "")
+                    response = _req.post(
+                        url, data=payload + "&jKey=" + token, timeout=30
+                    )
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except Exception:
+                    return {"stat": "Not_Ok", "emsg": response.text}
 
             # Override the legacy NorenRestApiPy WebSocket callbacks.
             # The legacy package sends t="c" with pwd/susertoken; OAuth requires
@@ -214,6 +269,8 @@ symbol_tokens = {}
 token_symbols = {}
 historical_data_cache = {}
 order_history = []
+pending_order_updates = []
+last_order_reconcile = 0
 tick_count = 0
 last_symbol_check = 0
 last_excel_update = 0
@@ -266,8 +323,12 @@ def get_hist_headers():
     ]
 
 def get_order_headers():
-    """Get order column headers"""
-    return ['Quantity', 'BUY Trigger', 'BUY Status', 'SELL Trigger', 'SELL Status']
+    """Order layout: R Qty, S BUY Trigger, T BUY Status, U BUY Order No,
+    V SELL Trigger, W SELL Status, X SELL Order No."""
+    return [
+        'Quantity', 'BUY Trigger', 'BUY Status', 'BUY Order No',
+        'SELL Trigger', 'SELL Status', 'SELL Order No'
+    ]
 
 # ============================================
 # CONFIGURATION - FULLY CUSTOMIZABLE
@@ -291,7 +352,7 @@ class Config:
     SYMBOL_COL = 'A'           # Symbols column
     
     LIVE_START = 'B'           # Live data starts here
-    HIST_START = 'W'  #   'W'       # Historical data starts here
+    HIST_START = 'Y'           # Historical data starts after order columns R-X
     ORDER_START = 'R'   #    'R'      # Order data starts here
 
 # ============================================
@@ -312,7 +373,7 @@ LIVE_END = LIVE_COLS[-1] if LIVE_COLS else Config.LIVE_START
 HIST_END = HIST_COLS[-1] if HIST_COLS else Config.HIST_START
 ORDER_END = ORDER_COLS[-1] if ORDER_COLS else Config.ORDER_START
 
-# Get ALL columns in order: A, LIVE, HIST, ORDERS
+# Get ALL columns in order: A, LIVE, ORDERS, HISTORICAL
 ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + ORDER_COLS + HIST_COLS
 
 # ============================================
@@ -359,48 +420,41 @@ def tradingview_bb(close, length=20, std=2.0):
 # ============================================
 
 def place_order(symbol, qty, buy_sell, price=0, product_type='C'):
+    """Submit one Shoonya order and return the complete broker response."""
     try:
         if symbol not in symbol_tokens:
             print(f"❌ Symbol {symbol} not found")
             return None
-            
+
         tk = symbol_tokens[symbol]
         exchange, tradingsymbol = parse_symbol_input(symbol)
-        
         print(f"📊 Placing {buy_sell} order: {qty} shares of {symbol}")
-        
         buy_or_sell = 'B' if buy_sell.upper() == 'BUY' else 'S'
-        
+
         if price <= 0:
-            if tk and tk in live_data:
-                current_price = live_data[tk].get('ltp', 0)
-                if current_price > 0:
-                    if buy_sell.upper() == 'BUY':
-                        price = current_price + 5
-                    else:
-                        price = current_price - 5
-                else:
-                    price = 100
+            current_price = live_data.get(tk, {}).get('ltp', 0)
+            if current_price > 0:
+                price = current_price + 5 if buy_sell.upper() == 'BUY' else max(0.05, current_price - 5)
             else:
-                price = 100
-        
+                print("❌ No live LTP available; refusing to submit an estimated-price order.")
+                return None
+
         login_sheet = excel_name.sheets['LOGIN']
-        algo_id = login_sheet.range('B2').value
-        algo_id = str(algo_id).strip() if algo_id else ''
-        
+        algo_id_value = login_sheet.range('B2').value
+        algo_id = str(algo_id_value).strip() if algo_id_value else ''
         if not algo_id:
-            print("❌ algo_id not found in Excel B2 (CLIENT_ID)")
+            print("❌ Algo ID / Client ID is blank in LOGIN!B2")
             return None
-        
+
         order_params = {
             'buy_or_sell': buy_or_sell,
             'product_type': product_type,
             'exchange': exchange,
             'tradingsymbol': tradingsymbol,
-            'quantity': qty,
+            'quantity': int(qty),
             'discloseqty': 0,
             'price_type': 'LMT',
-            'price': str(price),
+            'price': str(round(float(price), 2)),
             'trigger_price': None,
             'retention': 'DAY',
             'amo': None,
@@ -410,34 +464,32 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C'):
             'trail_price': 0.0,
             'algo_id': algo_id
         }
-        
+
         print(f"📋 Order Params: {order_params}")
-        
         result = api.place_order(**order_params)
-        
         print(f"📋 API Response: {result}")
-        
-        if result and result.get('norenordno'):
+
+        if isinstance(result, dict) and result.get('norenordno'):
             order_info = {
-                'order_no': result['norenordno'],
+                'order_no': normalize_order_no(result['norenordno']),
                 'symbol': symbol,
-                'qty': qty,
-                'type': buy_sell,
-                'price': price,
-                'status': result.get('status', 'PENDING'),
+                'qty': int(qty),
+                'type': buy_sell.upper(),
+                'price': float(price),
+                'status': normalize_order_status(result.get('status') or 'PENDING'),
                 'time': datetime.now().strftime('%H:%M:%S')
             }
             order_history.append(order_info)
-            print(f"✅ Order placed: {buy_sell} {qty} of {symbol}")
-            print(f"   Order No: {result['norenordno']}")
-            return result['norenordno']
-        else:
-            print(f"❌ Order failed: {result}")
-            return None
-            
+            print(f"✅ Broker accepted {buy_sell} order. Order No: {order_info['order_no']}")
+            return result
+
+        print(f"❌ Broker did not accept the order: {result}")
+        return result if isinstance(result, dict) else None
+
     except Exception as e:
         print(f"❌ Error placing order: {e}")
         return None
+
 
 # ============================================
 # FETCH HISTORICAL DATA
@@ -652,76 +704,207 @@ def GetToken(exchange, tradingsymbol):
 # CHECK ORDER SIGNALS FROM EXCEL
 # ============================================
 
+def normalize_order_no(value):
+    """Keep Shoonya order numbers as exact text, never scientific notation."""
+    if value is None or value == '':
+        return ''
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text_value = str(value).strip()
+    if text_value.endswith('.0') and text_value[:-2].isdigit():
+        return text_value[:-2]
+    return text_value
+
+
+def normalize_order_status(value):
+    raw = str(value or 'PENDING').strip().upper().replace(' ', '_')
+    mapping = {
+        'OPEN': 'OPEN', 'PENDING': 'PENDING', 'WAITING': 'PENDING',
+        'TRIGGER_PENDING': 'OPEN', 'COMPLETE': 'COMPLETE',
+        'COMPLETED': 'COMPLETE', 'REJECTED': 'REJECTED',
+        'CANCELED': 'CANCELED', 'CANCELLED': 'CANCELED',
+        'PARTIAL': 'OPEN', 'PARTIALLY_FILLED': 'OPEN'
+    }
+    return mapping.get(raw, raw or 'PENDING')
+
+
+def order_status_text(order):
+    status = normalize_order_status(order.get('status') or order.get('order_status') or 'PENDING')
+    filled = order.get('fillshares') or order.get('filled_qty') or ''
+    average = order.get('avgprc') or order.get('average_price') or ''
+    reason = order.get('rejreason') or order.get('rejection_reason') or ''
+    details = []
+    if filled not in ('', None):
+        details.append(f"Filled {filled}")
+    if average not in ('', None, '0', 0, '0.00'):
+        details.append(f"Avg {average}")
+    if status == 'REJECTED' and reason:
+        details.append(str(reason))
+    return status + ((" | " + " | ".join(details)) if details else "")
+
+
+def find_order_cells(order_no):
+    """Return worksheet row and status/order-number columns for a known order ID."""
+    target = normalize_order_no(order_no)
+    if not target:
+        return None
+    ws = excel_name.sheets['symbols']
+    symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
+    # R:X = Qty, BUY trigger, BUY status, BUY order no, SELL trigger, SELL status, SELL order no.
+    for idx, symbol_cell in enumerate(symbols_data):
+        if not symbol_cell:
+            continue
+        row_num = idx + 2
+        buy_no = normalize_order_no(ws.range(f"{ORDER_COLS[3]}{row_num}").value)
+        if buy_no == target:
+            return row_num, ORDER_COLS[2], ORDER_COLS[3]
+        sell_no = normalize_order_no(ws.range(f"{ORDER_COLS[6]}{row_num}").value)
+        if sell_no == target:
+            return row_num, ORDER_COLS[5], ORDER_COLS[6]
+    return None
+
+
+def apply_order_update(order):
+    if not isinstance(order, dict):
+        return
+    order_no = normalize_order_no(order.get('norenordno') or order.get('order_no'))
+    if not order_no:
+        return
+    cells = find_order_cells(order_no)
+    if not cells:
+        return
+    row_num, status_col, order_col = cells
+    ws = excel_name.sheets['symbols']
+    new_status = order_status_text(order)
+    old_status = str(ws.range(f"{status_col}{row_num}").value or '').upper()
+    old_base = normalize_order_status(old_status.split('|')[0].strip()) if old_status else ''
+    new_base = normalize_order_status(order.get('status') or order.get('order_status') or 'PENDING')
+    # Do not let delayed OPEN/PENDING messages replace final broker states.
+    final_states = ('COMPLETE', 'REJECTED', 'CANCELED')
+    if old_base in final_states and new_base not in final_states:
+        return
+    ws.range(f"{order_col}{row_num}").value = order_no
+    ws.range(f"{status_col}{row_num}").value = new_status
+
+
+def process_order_updates():
+    global pending_order_updates
+    updates = pending_order_updates[:]
+    pending_order_updates = []
+    for update in updates:
+        try:
+            apply_order_update(update)
+        except Exception as exc:
+            print(f"Order update write error: {exc}")
+
+
+def reconcile_order_statuses():
+    """Refresh broker status for all tracked BUY/SELL order numbers."""
+    global last_order_reconcile
+    now = time.time()
+    if now - last_order_reconcile < 2:
+        return
+    last_order_reconcile = now
+    try:
+        orders = api.get_order_book()
+        if not isinstance(orders, list):
+            return
+        tracked = {}
+        ws = excel_name.sheets['symbols']
+        symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
+        for idx, symbol_cell in enumerate(symbols_data):
+            if not symbol_cell:
+                continue
+            row_num = idx + 2
+            for order_col, status_col in (
+                (ORDER_COLS[3], ORDER_COLS[2]),
+                (ORDER_COLS[6], ORDER_COLS[5])
+            ):
+                order_no = normalize_order_no(ws.range(f"{order_col}{row_num}").value)
+                if order_no:
+                    tracked[order_no] = (row_num, status_col, order_col)
+        for broker_order in orders:
+            if not isinstance(broker_order, dict):
+                continue
+            order_no = normalize_order_no(broker_order.get('norenordno'))
+            target = tracked.get(order_no)
+            if not target:
+                continue
+            row_num, status_col, order_col = target
+            new_status = order_status_text(broker_order)
+            old_status = str(ws.range(f"{status_col}{row_num}").value or '').upper()
+            old_base = normalize_order_status(old_status.split('|')[0].strip()) if old_status else ''
+            new_base = normalize_order_status(broker_order.get('status') or 'PENDING')
+            if old_base in ('COMPLETE', 'REJECTED', 'CANCELED') and new_base not in ('COMPLETE', 'REJECTED', 'CANCELED'):
+                continue
+            ws.range(f"{order_col}{row_num}").value = order_no
+            ws.range(f"{status_col}{row_num}").value = new_status
+    except Exception as exc:
+        print(f"Order status reconciliation error: {exc}")
+
+
 def check_order_signals():
     try:
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value
         if not symbols_data:
             return
-        
-        # Get order columns dynamically
-        order_cols = ORDER_COLS
-        if len(order_cols) >= 5:
-            qty_col = order_cols[0]
-            buy_trigger_col = order_cols[1]
-            buy_status_col = order_cols[2]
-            sell_trigger_col = order_cols[3]
-            sell_status_col = order_cols[4]
-        else:
-            return
-        
+
+        qty_col, buy_trigger_col, buy_status_col, buy_order_col, sell_trigger_col, sell_status_col, sell_order_col = ORDER_COLS
+
         for idx, symbol_cell in enumerate(symbols_data):
             if not symbol_cell:
                 continue
-            
             row_num = idx + 2
             try:
                 symbol = normalized_symbol_key(symbol_cell)
-            except ValueError as exc:
-                print(f"Skipping symbol in row {row_num}: {exc}")
+            except ValueError:
                 continue
             if symbol not in symbol_tokens:
                 continue
-            
+
             qty_cell = ws.range(f"{qty_col}{row_num}").value
-            qty = int(float(qty_cell)) if qty_cell and str(qty_cell).replace('.', '').isdigit() else 1
-            
-            # Check BUY
-            buy_signal = ws.range(f"{buy_trigger_col}{row_num}").value
+            try:
+                qty = max(1, int(float(qty_cell))) if qty_cell not in ('', None) else 1
+            except Exception:
+                qty = 1
+
+            # BUY: trigger S, status T, broker order number U.
+            buy_signal = str(ws.range(f"{buy_trigger_col}{row_num}").value or '').strip().upper()
             buy_status = ws.range(f"{buy_status_col}{row_num}").value
-            
-            if buy_signal:
-                buy_signal = str(buy_signal).strip().upper()
-            
-            if buy_signal == "BUY" and not buy_status:
+            buy_order_no = normalize_order_no(ws.range(f"{buy_order_col}{row_num}").value)
+            if buy_signal == 'BUY' and not buy_status and not buy_order_no:
                 print(f"\n🔔 BUY Signal detected for {symbol} (Qty: {qty})")
-                order_no = place_order(symbol, qty, "BUY", price=0, product_type='C')
-                if order_no:
-                    ws.range(f"{buy_status_col}{row_num}").value = f"Bought: {order_no}"
-                    ws.range(f"{buy_trigger_col}{row_num}").value = "DONE"
+                result = place_order(symbol, qty, 'BUY', price=0, product_type='C')
+                if isinstance(result, dict) and result.get('norenordno'):
+                    order_no = normalize_order_no(result['norenordno'])
+                    ws.range(f"{buy_order_col}{row_num}").value = order_no
+                    ws.range(f"{buy_status_col}{row_num}").value = normalize_order_status(result.get('status') or 'PENDING')
+                    ws.range(f"{buy_trigger_col}{row_num}").value = 'DONE'
                 else:
-                    ws.range(f"{buy_status_col}{row_num}").value = "Failed"
-                    ws.range(f"{buy_trigger_col}{row_num}").value = "FAILED"
-            
-            # Check SELL
-            sell_signal = ws.range(f"{sell_trigger_col}{row_num}").value
+                    message = (result or {}).get('emsg') or (result or {}).get('message') or str(result or 'No broker response')
+                    ws.range(f"{buy_status_col}{row_num}").value = f"REJECTED | {message}"
+                    ws.range(f"{buy_trigger_col}{row_num}").value = 'FAILED'
+
+            # SELL: trigger V, status W, broker order number X.
+            sell_signal = str(ws.range(f"{sell_trigger_col}{row_num}").value or '').strip().upper()
             sell_status = ws.range(f"{sell_status_col}{row_num}").value
-            
-            if sell_signal:
-                sell_signal = str(sell_signal).strip().upper()
-            
-            if sell_signal == "SELL" and not sell_status:
+            sell_order_no = normalize_order_no(ws.range(f"{sell_order_col}{row_num}").value)
+            if sell_signal == 'SELL' and not sell_status and not sell_order_no:
                 print(f"\n🔔 SELL Signal detected for {symbol} (Qty: {qty})")
-                order_no = place_order(symbol, qty, "SELL", price=0, product_type='C')
-                if order_no:
-                    ws.range(f"{sell_status_col}{row_num}").value = f"Sold: {order_no}"
-                    ws.range(f"{sell_trigger_col}{row_num}").value = "DONE"
+                result = place_order(symbol, qty, 'SELL', price=0, product_type='C')
+                if isinstance(result, dict) and result.get('norenordno'):
+                    order_no = normalize_order_no(result['norenordno'])
+                    ws.range(f"{sell_order_col}{row_num}").value = order_no
+                    ws.range(f"{sell_status_col}{row_num}").value = normalize_order_status(result.get('status') or 'PENDING')
+                    ws.range(f"{sell_trigger_col}{row_num}").value = 'DONE'
                 else:
-                    ws.range(f"{sell_status_col}{row_num}").value = "Failed"
-                    ws.range(f"{sell_trigger_col}{row_num}").value = "FAILED"
-                    
+                    message = (result or {}).get('emsg') or (result or {}).get('message') or str(result or 'No broker response')
+                    ws.range(f"{sell_status_col}{row_num}").value = f"REJECTED | {message}"
+                    ws.range(f"{sell_trigger_col}{row_num}").value = 'FAILED'
     except Exception as e:
         print(f"Order signal error: {e}")
+
 
 # ============================================
 # WEBSOCKET CALLBACKS
@@ -852,6 +1035,8 @@ def on_ws_error(error):
 
 def on_order(order):
     print(f"📋 Order Update: {order}")
+    if isinstance(order, dict):
+        pending_order_updates.append(order)
 
 def subscribe_symbols(tokens_list):
     if not tokens_list:
@@ -868,201 +1053,71 @@ def subscribe_symbols(tokens_list):
 # ============================================
 
 def update_excel_bulk():
+    """Refresh live and historical data only; never overwrite the order panel R:X."""
     global last_excel_update
-    
     try:
         current_time = time.time()
         if current_time - last_excel_update < Config.EXCEL_UPDATE_INTERVAL:
             return
         last_excel_update = current_time
-        
+
         ws = excel_name.sheets['symbols']
-        symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value
-        if not symbols_data:
-            return
-        
-        # Get order columns dynamically
-        order_cols = ORDER_COLS
-        if len(order_cols) >= 5:
-            qty_col = order_cols[0]
-            buy_trigger_col = order_cols[1]
-            buy_status_col = order_cols[2]
-            sell_trigger_col = order_cols[3]
-            sell_status_col = order_cols[4]
-        else:
-            return
-        
-        # Save existing order data
-        existing_orders = {}
-        for idx, symbol_cell in enumerate(symbols_data):
-            if not symbol_cell:
-                continue
-            row_num = idx + 2
-            try:
-                symbol = normalized_symbol_key(symbol_cell)
-            except ValueError:
-                continue
-            qty = ws.range(f"{qty_col}{row_num}").value
-            buy_trigger = ws.range(f"{buy_trigger_col}{row_num}").value
-            buy_status = ws.range(f"{buy_status_col}{row_num}").value
-            sell_trigger = ws.range(f"{sell_trigger_col}{row_num}").value
-            sell_status = ws.range(f"{sell_status_col}{row_num}").value
-            
-            existing_orders[symbol] = {
-                'qty': qty if qty else '',
-                'buy_trigger': buy_trigger if buy_trigger else '',
-                'buy_status': buy_status if buy_status else '',
-                'sell_trigger': sell_trigger if sell_trigger else '',
-                'sell_status': sell_status if sell_status else ''
-            }
-        
-        rows = []
-        
+        symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
+        live_rows = []
+        hist_rows = []
+
         for symbol_cell in symbols_data:
             if not symbol_cell:
-                rows.append([''] * len(ALL_COLS))
+                live_rows.append([''] * LIVE_COUNT)
+                hist_rows.append([''] * HIST_COUNT)
                 continue
-            
             try:
                 symbol = normalized_symbol_key(symbol_cell)
             except ValueError:
-                rows.append([''] * len(ALL_COLS))
+                live_rows.append([''] * LIVE_COUNT)
+                hist_rows.append([''] * HIST_COUNT)
                 continue
+
             tk = symbol_tokens.get(symbol)
             hist = historical_data_cache.get(symbol)
             hist_yesterday = hist['yesterday'] if hist else {}
-            order_data = existing_orders.get(symbol, {})
-            
             if tk and tk in live_data:
                 d = live_data[tk]
-                ltp = d.get('ltp', 0)
-                
-                # Build row in correct order: A, LIVE, HIST, ORDERS
-                row = []
-                
-                # Column A: Symbol
-                row.append(symbol)
-                
-                # LIVE DATA (Columns B-Q)
-                row.extend([
-                    ltp if ltp > 0 else '',
+                live_rows.append([
+                    d.get('ltp', 0) if d.get('ltp', 0) > 0 else '',
                     d.get('open', 0) if d.get('open', 0) > 0 else '',
                     d.get('high', 0) if d.get('high', 0) > 0 else '',
                     d.get('low', 0) if d.get('low', 0) > 0 else '',
                     d.get('close', 0) if d.get('close', 0) > 0 else '',
                     d.get('volume', 0) if d.get('volume', 0) > 0 else '',
-                    d.get('rsi', ''),
-                    d.get('stoch_rsi', ''),
-                    d.get('sma_stoch', ''),
-                    d.get('bb_upper', ''),
-                    d.get('bb_middle', ''),
-                    d.get('bb_lower', ''),
-                    d.get('buy', ''),
-                    d.get('sell', ''),
-                    d.get('signal', ''),
+                    d.get('rsi', ''), d.get('stoch_rsi', ''),
+                    d.get('sma_stoch', ''), d.get('bb_upper', ''),
+                    d.get('bb_middle', ''), d.get('bb_lower', ''),
+                    d.get('buy', ''), d.get('sell', ''), d.get('signal', ''),
                     d['timestamp'].strftime('%H:%M:%S') if d.get('timestamp') else ''
                 ])
-                
-                # HISTORICAL DATA (Columns W-AK)
-                row.extend([
-                    hist_yesterday.get('date', ''),
-                    hist_yesterday.get('open', ''),
-                    hist_yesterday.get('high', ''),
-                    hist_yesterday.get('low', ''),
-                    hist_yesterday.get('close', ''),
-                    hist_yesterday.get('volume', ''),
-                    hist_yesterday.get('rsi', ''),
-                    hist_yesterday.get('stoch_rsi', ''),
-                    hist_yesterday.get('sma_stoch', ''),
-                    hist_yesterday.get('bb_upper', ''),
-                    hist_yesterday.get('bb_middle', ''),
-                    hist_yesterday.get('bb_lower', ''),
-                    hist_yesterday.get('buy', ''),
-                    hist_yesterday.get('sell', ''),
-                    hist_yesterday.get('signal', '')
-                ])
-                
-                # ORDERS (Columns R-V) - PLACE ORDER COLUMNS BEFORE HISTORICAL
-                # Wait! The order should be: Symbol, LIVE, ORDERS, HISTORICAL
-                # But your config says: LIVE(B-Q), ORDERS(R-V), HISTORICAL(W-AK)
-                # So the correct order is: Symbol, LIVE, ORDERS, HISTORICAL
-                
-                # Let me fix this - the row should be built in this exact order:
-                # 1. Symbol (A)
-                # 2. LIVE (B-Q) 
-                # 3. ORDERS (R-V)
-                # 4. HISTORICAL (W-AK)
-                
-                # I need to rebuild the row properly
-                row_correct = []
-                
-                # 1. Symbol
-                row_correct.append(symbol)
-                
-                # 2. LIVE DATA (B-Q)
-                row_correct.extend([
-                    ltp if ltp > 0 else '',
-                    d.get('open', 0) if d.get('open', 0) > 0 else '',
-                    d.get('high', 0) if d.get('high', 0) > 0 else '',
-                    d.get('low', 0) if d.get('low', 0) > 0 else '',
-                    d.get('close', 0) if d.get('close', 0) > 0 else '',
-                    d.get('volume', 0) if d.get('volume', 0) > 0 else '',
-                    d.get('rsi', ''),
-                    d.get('stoch_rsi', ''),
-                    d.get('sma_stoch', ''),
-                    d.get('bb_upper', ''),
-                    d.get('bb_middle', ''),
-                    d.get('bb_lower', ''),
-                    d.get('buy', ''),
-                    d.get('sell', ''),
-                    d.get('signal', ''),
-                    d['timestamp'].strftime('%H:%M:%S') if d.get('timestamp') else ''
-                ])
-                
-                # 3. ORDERS (R-V)
-                row_correct.extend([
-                    order_data.get('qty', ''),
-                    order_data.get('buy_trigger', ''),
-                    order_data.get('buy_status', ''),
-                    order_data.get('sell_trigger', ''),
-                    order_data.get('sell_status', '')
-                ])
-                
-                # 4. HISTORICAL DATA (W-AK)
-                row_correct.extend([
-                    hist_yesterday.get('date', ''),
-                    hist_yesterday.get('open', ''),
-                    hist_yesterday.get('high', ''),
-                    hist_yesterday.get('low', ''),
-                    hist_yesterday.get('close', ''),
-                    hist_yesterday.get('volume', ''),
-                    hist_yesterday.get('rsi', ''),
-                    hist_yesterday.get('stoch_rsi', ''),
-                    hist_yesterday.get('sma_stoch', ''),
-                    hist_yesterday.get('bb_upper', ''),
-                    hist_yesterday.get('bb_middle', ''),
-                    hist_yesterday.get('bb_lower', ''),
-                    hist_yesterday.get('buy', ''),
-                    hist_yesterday.get('sell', ''),
-                    hist_yesterday.get('signal', '')
-                ])
-                
-                rows.append(row_correct)
             else:
-                rows.append([''] * len(ALL_COLS))
-        
-        if rows:
-            data_rows = []
-            for row in rows:
-                data_rows.append(row[1:])  # Skip column A
-            
-            if data_rows:
-                start_col = 'B'
-                end_col = ALL_COLS[-1]
-                ws.range(f"{start_col}2:{end_col}{2 + len(data_rows) - 1}").value = data_rows
-            
+                live_rows.append([''] * LIVE_COUNT)
+
+            hist_rows.append([
+                hist_yesterday.get('date', ''), hist_yesterday.get('open', ''),
+                hist_yesterday.get('high', ''), hist_yesterday.get('low', ''),
+                hist_yesterday.get('close', ''), hist_yesterday.get('volume', ''),
+                hist_yesterday.get('rsi', ''), hist_yesterday.get('stoch_rsi', ''),
+                hist_yesterday.get('sma_stoch', ''), hist_yesterday.get('bb_upper', ''),
+                hist_yesterday.get('bb_middle', ''), hist_yesterday.get('bb_lower', ''),
+                hist_yesterday.get('buy', ''), hist_yesterday.get('sell', ''),
+                hist_yesterday.get('signal', '')
+            ])
+
+        if live_rows:
+            last_row = 1 + len(live_rows)
+            ws.range(f"{Config.LIVE_START}2:{LIVE_END}{last_row}").value = live_rows
+            ws.range(f"{Config.HIST_START}2:{HIST_END}{last_row}").value = hist_rows
+
     except Exception as e:
         print(f"Excel update error: {e}")
+
 
 # ============================================
 # SETUP HEADERS - DYNAMIC
@@ -1104,6 +1159,10 @@ def setup_excel_headers():
         for col in ALL_COLS:
             ws.range(f'{col}:{col}').column_width = 12
         ws.range('A:A').column_width = 20
+        ws.range('T:T').column_width = 25
+        ws.range('U:U').column_width = 20
+        ws.range('W:W').column_width = 25
+        ws.range('X:X').column_width = 20
 
         return True
     except Exception:
@@ -1230,8 +1289,10 @@ def start_excel_loop():
                 check_new_symbols()
                 last_symbol_check = current
             
+            process_order_updates()
+            reconcile_order_statuses()
             check_order_signals()
-            
+
             update_excel_bulk()
             
             update_count += 1
