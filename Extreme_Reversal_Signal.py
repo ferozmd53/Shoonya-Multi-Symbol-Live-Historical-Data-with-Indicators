@@ -1268,8 +1268,6 @@ def setup_excel_headers():
     try:
         ws = excel_name.sheets['symbols']
         migrate_legacy_layout(ws)
-    try:
-        ws = excel_name.sheets['symbols']
         ws.range("1:1").clear_contents()
         
         # Build headers in correct order: Symbol, LIVE, ORDERS, HISTORICAL
