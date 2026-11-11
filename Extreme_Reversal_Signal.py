@@ -85,6 +85,57 @@ except Exception:
                 self.accountid    = actid
                 print(f"✅ injectOAuthHeader OK (uid={uid})")
 
+            # Override the legacy NorenRestApiPy WebSocket callbacks.
+            # The legacy package sends t="c" with pwd/susertoken; OAuth requires
+            # t="a" with accesstoken and an ak/ck connection acknowledgement.
+            def _NorenApi__on_open_callback(self, ws=None):
+                self._NorenApi__websocket_connected = True
+                payload = {
+                    "t": "a",
+                    "uid": self._NorenApi__username,
+                    "actid": self._NorenApi__accountid or self._NorenApi__username,
+                    "source": "API",
+                    "accesstoken": self._NorenApi__access_token,
+                }
+                self._NorenApi__ws_send(_json.dumps(payload))
+
+            def _NorenApi__on_data_callback(
+                self, ws=None, message=None, data_type=None, continue_flag=None
+            ):
+                try:
+                    data = _json.loads(message) if isinstance(message, str) else message
+                    if not isinstance(data, dict):
+                        return
+                    msg_type = data.get("t")
+                    if msg_type in ("ak", "ck"):
+                        if str(data.get("s", "")).strip().lower() in ("ok", "success"):
+                            callback = self._NorenApi__on_open
+                            if callback:
+                                callback()
+                        else:
+                            error_callback = self._NorenApi__on_error
+                            if error_callback:
+                                error_callback(data)
+                            else:
+                                print(f"❌ Shoonya WebSocket authentication rejected: {data}")
+                        return
+                    if msg_type in ("tk", "tf", "dk", "df"):
+                        callback = self._NorenApi__subscribe_callback
+                        if callback:
+                            callback(data)
+                        return
+                    if msg_type == "om":
+                        callback = self._NorenApi__order_update_callback
+                        if callback:
+                            callback(data)
+                        return
+                except Exception as e:
+                    error_callback = self._NorenApi__on_error
+                    if error_callback:
+                        error_callback(e)
+                    else:
+                        print(f"❌ WebSocket message error: {e}")
+
         print("⚠️  Using NorenRestApiPy with jData-raw-string shim")
         print("   For the real package: pip install --no-cache-dir --no-deps NorenRestApiOAuth")
     except ImportError:
@@ -272,7 +323,7 @@ class ShoonyaApiPy(NorenApi):
     def __init__(self):
         super().__init__(
             host='https://api.shoonya.com/NorenWClientAPI/',
-            websocket='wss://api.shoonya.com/NorenWSTP/'
+            websocket='wss://api.shoonya.com/NorenWSAPI/'
         )
 
 # ============================================
@@ -796,6 +847,9 @@ def on_close():
     feed_opened = False
     print("❌ WebSocket Closed")
 
+def on_ws_error(error):
+    print(f"❌ WebSocket error / authentication response: {error}")
+
 def on_order(order):
     print(f"📋 Order Update: {order}")
 
@@ -1293,7 +1347,8 @@ def main():
             subscribe_callback=on_ticks,
             order_update_callback=on_order,
             socket_open_callback=on_open,
-            socket_close_callback=on_close
+            socket_close_callback=on_close,
+            socket_error_callback=on_ws_error
         )
         
         for _ in range(15):
