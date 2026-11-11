@@ -14,18 +14,21 @@ except Exception:
         from NorenRestApiPy.NorenApi import NorenApi as _BaseNorenApi
         import requests as _req
         import json as _json
+        import hashlib as _hashlib
 
         class NorenApi(_BaseNorenApi):
             """NorenRestApiPy with getAccessToken that mimics NorenRestApiOAuth exactly."""
 
             def getAccessToken(self, auth_code, secret_key, client_id, uid):
                 url = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
+                # Shoonya OAuth requires SHA256(client_id + secret_key + auth_code).
+                checksum = _hashlib.sha256(
+                    (client_id + secret_key + auth_code).encode("utf-8")
+                ).hexdigest()
                 inner = {
-                    "uid":       uid,
-                    "code":      auth_code,
-                    "secret":    secret_key,
-                    "client_id": client_id,
-                    "source":    "API",
+                    "uid": uid,
+                    "code": auth_code,
+                    "checksum": checksum,
                 }
 
                 # ── CRITICAL: send 'jData=<raw-json>' as a STRING, not a dict.
@@ -34,34 +37,47 @@ except Exception:
                 payload = "jData=" + _json.dumps(inner)
 
                 try:
-                    r = _req.post(url, data=payload, timeout=30)
+                    r = _req.post(
+                        url,
+                        data=payload,
+                        headers={"Content-Type": "text/plain"},
+                        timeout=30,
+                    )
+                    r.raise_for_status()
                     ret = r.json()
                 except Exception as e:
                     print(f"❌ getAccessToken HTTP error: {e}")
                     return None
 
                 if ret.get("stat") == "Ok":
-                    try:
-                        self._NorenApi__access_token = ret["access_token"]
-                        self._NorenApi__username     = ret["uid"]
-                        self._NorenApi__accountid    = ret.get("actid")
-                    except Exception:
-                        pass
-                    self.access_token = ret["access_token"]
-                    self.username     = ret["uid"]
-                    self.accountid    = ret.get("actid")
-                    print(f"✅ getAccessToken OK (uid={ret['uid']})")
-                    return (ret["access_token"], ret["uid"],
-                            ret.get("refresh_token"), ret.get("actid"))
+                    token = ret.get("access_token") or ret.get("susertoken")
+                    response_uid = ret.get("uid") or uid
+                    actid = ret.get("actid") or response_uid
+                    if not token:
+                        print(f"❌ getAccessToken response has no token: {ret}")
+                        return None
+
+                    # NorenRestApiPy uses the private susertoken for REST/WebSocket calls.
+                    self._NorenApi__susertoken = token
+                    self._NorenApi__access_token = token
+                    self._NorenApi__username = response_uid
+                    self._NorenApi__accountid = actid
+
+                    self.access_token = token
+                    self.username = response_uid
+                    self.accountid = actid
+                    print(f"✅ getAccessToken OK (uid={response_uid})")
+                    return (token, response_uid, ret.get("refresh_token"), actid)
 
                 print(f"❌ getAccessToken failed: {ret}")
                 return None
 
             def injectOAuthHeader(self, token, uid, actid=None):
                 try:
+                    self._NorenApi__susertoken = token
                     self._NorenApi__access_token = token
-                    self._NorenApi__username     = uid
-                    self._NorenApi__accountid    = actid
+                    self._NorenApi__username = uid
+                    self._NorenApi__accountid = actid
                 except Exception:
                     pass
                 self.access_token = token
@@ -246,7 +262,7 @@ HIST_END = HIST_COLS[-1] if HIST_COLS else Config.HIST_START
 ORDER_END = ORDER_COLS[-1] if ORDER_COLS else Config.ORDER_START
 
 # Get ALL columns in order: A, LIVE, HIST, ORDERS
-ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + HIST_COLS + ORDER_COLS
+ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + ORDER_COLS + HIST_COLS
 
 # ============================================
 # API CLASS
