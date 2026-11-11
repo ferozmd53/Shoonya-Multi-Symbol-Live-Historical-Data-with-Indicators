@@ -11,17 +11,49 @@ Python application for Shoonya market data, multi-symbol Excel monitoring, Stoch
 - Microsoft Excel desktop (required by xlwings)
 - A valid Shoonya account and API access
 
-## Install
+## Easy install (Windows)
 
-Clone this repository, open a terminal in the project folder, then run:
+**One command installs the application and its Python dependencies:**
 
 ```powershell
-py -m pip install --upgrade pip
+py -m pip install --upgrade "git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git"
+```
+
+After installation, start it from Command Prompt or PowerShell with:
+
+```powershell
+shoonya-trader
+```
+
+If Windows says `shoonya-trader` is not recognized, use the Python module launcher instead:
+
+```powershell
+py -m run
+```
+
+To update to the latest version later:
+
+```powershell
+py -m pip install --upgrade --force-reinstall "git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git"
+```
+
+### Requirements before first run
+
+- Windows 10/11, Python 3.8 or newer, and Git installed and available in PATH (pip uses Git to install directly from GitHub).
+- Microsoft Excel desktop installed; this application uses `xlwings`.
+- Google Chrome installed for the Shoonya browser login flow.
+- Your own private `PythonTrader_Terminal_LMT.xlsm` workbook. The installer does not download or create a workbook containing personal login details.
+
+If Git is not installed, install Git for Windows first, restart the terminal, and retry the install command.
+
+### Manual developer install
+
+If you prefer to work from a cloned source folder:
+
+```powershell
 py -m pip install -r requirements.txt
 py -m pip install -e .
 ```
-
-The requirements file installs the Shoonya API client, Excel integration, pandas/numpy, HTTP, TOTP, and WebSocket dependencies. The package setup also installs `instrument_master.py` as an importable module.
 
 ## Local workbook
 
