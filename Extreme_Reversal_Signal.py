@@ -20,54 +20,49 @@ except Exception:
             """NorenRestApiPy with getAccessToken that mimics NorenRestApiOAuth exactly."""
 
             def getAccessToken(self, auth_code, secret_key, client_id, uid):
-                url = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
-                # Shoonya OAuth requires SHA256(client_id + secret_key + auth_code).
-                checksum = _hashlib.sha256(
-                    (client_id + secret_key + auth_code).encode("utf-8")
-                ).hexdigest()
-                inner = {
-                    "uid": uid,
-                    "code": auth_code,
-                    "checksum": checksum,
-                }
-
-                # ── CRITICAL: send 'jData=<raw-json>' as a STRING, not a dict.
-                #    A dict would be URL-encoded by requests (e.g. %7B%22uid%22...),
-                #    which Shoonya rejects with "jData is not valid json object".
-                payload = "jData=" + _json.dumps(inner)
-
-                try:
-                    r = _req.post(
-                        url,
-                        data=payload,
-                        headers={"Content-Type": "text/plain"},
-                        timeout=30,
-                    )
-                    r.raise_for_status()
-                    ret = r.json()
-                except Exception as e:
-                    print(f"❌ getAccessToken HTTP error: {e}")
+                """Exchange a fresh Shoonya OAuth code with its required SHA256 checksum."""
+                if not all(str(v or "").strip() for v in (auth_code, secret_key, client_id, uid)):
+                    print("❌ OAuth exchange stopped: auth code or API credentials are blank")
                     return None
 
-                if ret.get("stat") == "Ok":
-                    token = ret.get("access_token") or ret.get("susertoken")
-                    response_uid = ret.get("uid") or uid
-                    actid = ret.get("actid") or response_uid
-                    if not token:
-                        print(f"❌ getAccessToken response has no token: {ret}")
-                        return None
+                url = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
+                checksum = _hashlib.sha256(
+                    (str(client_id).strip() + str(secret_key).strip() + str(auth_code).strip()).encode("utf-8")
+                ).hexdigest()
+                payload = "jData=" + _json.dumps({
+                    "code": str(auth_code).strip(),
+                    "checksum": checksum,
+                })
 
-                    # NorenRestApiPy uses the private susertoken for REST/WebSocket calls.
-                    self._NorenApi__susertoken = token
-                    self._NorenApi__access_token = token
-                    self._NorenApi__username = response_uid
-                    self._NorenApi__accountid = actid
+                try:
+                    response = _req.post(
+                        url,
+                        data=payload,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        timeout=30,
+                    )
+                    ret = response.json()
+                except Exception as exc:
+                    print(f"❌ getAccessToken HTTP error: {exc}")
+                    return None
 
-                    self.access_token = token
-                    self.username = response_uid
+                if ret.get("stat") == "Ok" and (ret.get("access_token") or ret.get("susertoken")):
+                    access_token = ret.get("access_token") or ret.get("susertoken")
+                    returned_uid = ret.get("uid") or ret.get("USERID") or uid
+                    actid = ret.get("actid")
+                    refresh_token = ret.get("refresh_token")
+                    try:
+                        self._NorenApi__access_token = access_token
+                        self._NorenApi__username = returned_uid
+                        self._NorenApi__accountid = actid
+                        self._NorenApi__susertoken = ret.get("susertoken", access_token)
+                    except Exception:
+                        pass
+                    self.access_token = access_token
+                    self.username = returned_uid
                     self.accountid = actid
-                    print(f"✅ getAccessToken OK (uid={response_uid})")
-                    return (token, response_uid, ret.get("refresh_token"), actid)
+                    print(f"✅ getAccessToken OK (uid={returned_uid})")
+                    return (access_token, returned_uid, refresh_token, actid)
 
                 print(f"❌ getAccessToken failed: {ret}")
                 return None
