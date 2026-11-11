@@ -784,17 +784,18 @@ def on_ticks(tick):
                 d['signal'] = signal
                 
     except Exception as e:
-        pass
+        print(f"❌ Tick callback error: {e}")
 
-def on_open():
+def on_open(*args):
     global feed_opened
     feed_opened = True
     print("✅ WebSocket Connected")
 
-def on_close():
+def on_close(*args):
     global feed_opened
     feed_opened = False
-    print("❌ WebSocket Closed")
+    details = " | ".join(str(x) for x in args if x is not None)
+    print("❌ WebSocket Closed" + (f" | {details}" if details else ""))
 
 def on_order(order):
     """Apply broker order updates to the matching Excel order-status cell."""
@@ -840,7 +841,7 @@ def subscribe_symbols(tokens_list):
         try:
             api.subscribe(tokens_list[i:i+10])
         except Exception as e:
-            pass
+            print(f"❌ WebSocket subscribe failed for batch {i // 10 + 1}: {e}")
         time.sleep(0.1)
 
 # ============================================
@@ -1029,7 +1030,16 @@ def update_excel_bulk():
                 
                 rows.append(row_correct)
             else:
-                rows.append([''] * len(ALL_COLS))
+                # Preserve order inputs for symbols that cannot be resolved to a token.
+                missing_row = [''] * len(ALL_COLS)
+                missing_row[17:22] = [
+                    order_data.get('qty', ''),
+                    order_data.get('buy_trigger', ''),
+                    order_data.get('buy_status', ''),
+                    order_data.get('sell_trigger', ''),
+                    order_data.get('sell_status', '')
+                ]
+                rows.append(missing_row)
         
         if rows:
             data_rows = []
@@ -1315,6 +1325,15 @@ def main():
         time.sleep(0.03)
     
     print(f"\n✅ Initialized {len(symbol_tokens)} symbols")
+
+    # Populate historical columns immediately, without waiting for WebSocket.
+    print("\n📥 Writing initial historical data to Excel...")
+    try:
+        update_excel_bulk()
+        excel_name.save()
+        print("✅ Initial Excel data write completed and workbook saved")
+    except Exception as excel_error:
+        print(f"❌ Initial Excel write failed: {excel_error}")
     
     if len(symbol_tokens) == 0:
         print("❌ No symbols!")
