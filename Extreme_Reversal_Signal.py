@@ -332,11 +332,11 @@ def get_hist_headers():
     ]
 
 def get_order_headers():
-    """R:AB order panel. BUY and SELL each have trigger, product, DONE, status and order number."""
+    """R:AB order panel with BUY/SELL limit price (PRC), broker status and order number."""
     return [
         'Quantity',
-        'BUY', 'BUY Type', ' ', 'BUY Broker Status', 'BUY Order No',
-        'SELL', 'SELL Type', ' ', 'SELL Broker Status', 'SELL Order No'
+        'BUY', 'BUY Type', 'BUY PRC', 'BUY Broker Status', 'BUY Order No',
+        'SELL', 'SELL Type', 'SELL PRC', 'SELL Broker Status', 'SELL Order No'
     ]
 
 # ============================================
@@ -492,7 +492,11 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
                 'time': datetime.now().strftime('%H:%M:%S')
             }
             order_history.append(order_info)
-            print(f"✅ Broker accepted {buy_sell} order. Order No: {order_info['order_no']}")
+            # Keep the submitted limit price until the asynchronous broker update
+            # supplies its authoritative PRC field.
+            result = dict(result)
+            result['_submitted_prc'] = str(round(float(price), 2))
+            print(f"📋 Broker order number received; awaiting final status. Order No: {order_info['order_no']}")
             return result
 
         print(f"❌ Broker did not accept the order: {result}")
@@ -867,22 +871,22 @@ def order_status_text(order):
 
 
 def find_order_cells(order_no):
-    """Find a broker order in BUY W or SELL AB and return its row/status/order columns."""
+    """Find an order and return its row, status, order-number and PRC columns."""
     target = normalize_order_no(order_no)
     if not target:
         return None
     ws = excel_name.sheets['symbols']
     symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
-    buy_order_col, buy_status_col = ORDER_COLS[5], ORDER_COLS[4]
-    sell_order_col, sell_status_col = ORDER_COLS[10], ORDER_COLS[9]
+    buy_order_col, buy_status_col, buy_prc_col = ORDER_COLS[5], ORDER_COLS[4], ORDER_COLS[3]
+    sell_order_col, sell_status_col, sell_prc_col = ORDER_COLS[10], ORDER_COLS[9], ORDER_COLS[8]
     for idx, symbol_cell in enumerate(symbols_data):
         if not symbol_cell:
             continue
         row_num = idx + 2
         if normalize_order_no(ws.range(f"{buy_order_col}{row_num}").value) == target:
-            return row_num, buy_status_col, buy_order_col
+            return row_num, buy_status_col, buy_order_col, buy_prc_col
         if normalize_order_no(ws.range(f"{sell_order_col}{row_num}").value) == target:
-            return row_num, sell_status_col, sell_order_col
+            return row_num, sell_status_col, sell_order_col, sell_prc_col
     return None
 
 
@@ -893,8 +897,11 @@ def apply_order_update(order):
     cells = find_order_cells(order_no)
     if not cells:
         return
-    row_num, status_col, order_col = cells
+    row_num, status_col, order_col, prc_col = cells
     ws = excel_name.sheets['symbols']
+    broker_prc = order.get('prc') or order.get('price')
+    if broker_prc not in ('', None):
+        ws.range(f"{prc_col}{row_num}").value = broker_prc
     new_status = order_status_text(order)
     old_status = str(ws.range(f"{status_col}{row_num}").value or '').upper()
     old_base = normalize_order_status(old_status.split('|')[0].strip()) if old_status else ''
@@ -959,6 +966,10 @@ def process_order_results():
             if result.get("norenordno"):
                 order_no = normalize_order_no(result["norenordno"])
                 ws.range(f"{item['order_col']}{item['row']}").value = order_no
+                submitted_prc = result.get("_submitted_prc") or result.get("prc")
+                if submitted_prc not in ('', None):
+                    prc_col = ORDER_COLS[3 if item['side'] == 'BUY' else 8]
+                    ws.range(f"{prc_col}{item['row']}").value = submitted_prc
                 broker_status = result.get("status") or result.get("order_status")
                 if broker_status:
                     ws.range(f"{item['status_col']}{item['row']}").value = normalize_order_status(broker_status)
@@ -1010,6 +1021,10 @@ def reconcile_order_statuses():
                     if not target:
                         continue
                     row_num, status_col, order_col, old_status = target
+                    prc_col = ORDER_COLS[3] if status_col == ORDER_COLS[4] else ORDER_COLS[8]
+                    broker_prc = broker_order.get('prc') or broker_order.get('price')
+                    if broker_prc not in ('', None):
+                        ws.range(f"{prc_col}{row_num}").value = broker_prc
                     broker_status = broker_order.get('status') or broker_order.get('order_status')
                     if not broker_status:
                         continue
