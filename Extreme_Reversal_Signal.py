@@ -275,6 +275,7 @@ order_inflight = set()
 order_inflight_lock = threading.Lock()
 order_reconcile_future = None
 last_order_reconcile = 0
+last_order_signal_scan = 0
 tick_count = 0
 last_symbol_check = 0
 last_excel_update = 0
@@ -332,8 +333,8 @@ def get_order_headers():
     """R:AB order panel with BUY/SELL limit price (PRC), broker status and order number."""
     return [
         'Quantity',
-        'BUY', 'BUY Type', 'BUY PRC', 'BUY Broker Status', 'BUY Order No',
-        'SELL', 'SELL Type', 'SELL PRC', 'SELL Broker Status', 'SELL Order No'
+        'BUY', 'ORDER TYPE (CNC/MIS)', 'BUY PRC', 'BUY Broker Status', 'BUY Order No',
+        'SELL', '', 'SELL PRC', 'SELL Broker Status', 'SELL Order No'
     ]
 
 # ============================================
@@ -948,16 +949,78 @@ def apply_order_update(order):
 
 
 def process_order_updates():
+    """Apply queued broker updates in batches; never let per-order cell scans delay live refresh."""
     global pending_order_updates
     with order_update_lock:
         updates = pending_order_updates[:]
         pending_order_updates.clear()
-    for update in updates:
-        try:
-            apply_order_update(update)
-        except Exception as exc:
-            print(f"Order update write error: {exc}")
+    if not updates:
+        return
 
+    try:
+        ws = excel_name.sheets['symbols']
+        panel = ws.range("R2:AB200").value or []
+        buy_block = []
+        sell_block = []
+        for row in panel:
+            values = list(row) if isinstance(row, (list, tuple)) else [row]
+            values += [""] * (11 - len(values))
+            buy_block.append(values[3:6])
+            sell_block.append(values[8:11])
+
+        buy_changed = False
+        sell_changed = False
+        order_rows = {}
+        for row_idx, row in enumerate(panel):
+            values = list(row) if isinstance(row, (list, tuple)) else [row]
+            values += [""] * (11 - len(values))
+            buy_no = normalize_order_no(values[5])
+            sell_no = normalize_order_no(values[10])
+            if buy_no:
+                order_rows[buy_no] = (row_idx, "BUY")
+            if sell_no:
+                order_rows[sell_no] = (row_idx, "SELL")
+
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            order_no = normalize_order_no(update.get("norenordno") or update.get("order_no"))
+            target = order_rows.get(order_no)
+            if not target:
+                continue
+            row_idx, side = target
+            raw_status = update.get("status") or update.get("order_status")
+            broker_prc = update.get("prc") or update.get("price")
+            if side == "BUY":
+                block = buy_block
+                prc_idx, status_idx, order_idx = 0, 1, 2
+                buy_changed = True
+            else:
+                block = sell_block
+                prc_idx, status_idx, order_idx = 0, 1, 2
+                sell_changed = True
+
+            if broker_prc not in ("", None):
+                block[row_idx][prc_idx] = broker_prc
+            if not raw_status:
+                continue
+
+            new_status = order_status_text(update)
+            old_status = str(block[row_idx][status_idx] or "").upper()
+            old_base = normalize_order_status(old_status.split("|")[0].strip()) if old_status else ""
+            new_base = normalize_order_status(raw_status)
+            final_states = ("COMPLETE", "REJECTED", "CANCELED")
+            if old_base in final_states and new_base not in final_states:
+                continue
+            block[row_idx][order_idx] = order_no
+            block[row_idx][status_idx] = new_status
+
+        if buy_changed:
+            ws.range("U2:W200").value = buy_block
+        if sell_changed:
+            ws.range("Z2:AB200").value = sell_block
+    except Exception as exc:
+        print(f"Order update batch write error: {exc}")
 
 def _submit_order_worker(symbol, qty, side, product_code, algo_id):
     """Worker thread: REST request only. It never reads or writes Excel COM."""
@@ -980,51 +1043,86 @@ def _order_worker_done(future, key, row_num, side, done_col, status_col, order_c
 
 
 def process_order_results():
-    """Write only broker-returned order numbers and broker statuses to Excel."""
+    """Batch-write broker order numbers, PRC and statuses without touching triggers or type."""
     ws = excel_name.sheets['symbols']
+    items = []
     while True:
         try:
-            item = order_result_queue.get_nowait()
+            items.append(order_result_queue.get_nowait())
         except queue.Empty:
             break
-        key = item["key"]
-        try:
-            result = item["result"]
-            if not isinstance(result, dict):
-                print(f"❌ {item['side']} {key[0]}: no broker response; no broker status written.")
-                continue
+    if not items:
+        return
 
-            if result.get("norenordno"):
-                order_no = normalize_order_no(result["norenordno"])
-                ws.range(f"{item['order_col']}{item['row']}").value = order_no
-                submitted_prc = result.get("_submitted_prc") or result.get("prc")
-                if submitted_prc not in ('', None):
-                    prc_col = ORDER_COLS[3 if item['side'] == 'BUY' else 8]
-                    ws.range(f"{prc_col}{item['row']}").value = submitted_prc
-                broker_status = result.get("status") or result.get("order_status")
-                if broker_status:
-                    ws.range(f"{item['status_col']}{item['row']}").value = normalize_order_status(broker_status)
-                print(f"📋 Broker response for {item['side']} {key[0]}: "
-                      f"{broker_status or 'Order number received'} | {order_no}")
-            elif result.get("local_error"):
-                print(f"⚠️ Local submission error for {item['side']} {key[0]}: "
-                      f"{result.get('emsg', 'Unknown error')}")
-            elif str(result.get("stat", "")).lower() in ("not_ok", "not ok") and result.get("emsg"):
-                # Shoonya's explicit Not_Ok response is a broker rejection.
-                ws.range(f"{item['status_col']}{item['row']}").value = (
-                    "REJECTED | " + str(result["emsg"])
-                )
-                print(f"📋 Broker rejected {item['side']} {key[0]}: {result['emsg']}")
-            else:
-                print(f"⚠️ No broker order number/status for {item['side']} {key[0]}: {result}")
-        except Exception as exc:
-            print(f"Excel broker-result write error for {key}: {exc}")
-        finally:
-            with order_inflight_lock:
-                order_inflight.discard(key)
+    try:
+        panel = ws.range("R2:AB200").value or []
+        buy_block = []
+        sell_block = []
+        for row in panel:
+            values = list(row) if isinstance(row, (list, tuple)) else [row]
+            values += [""] * (11 - len(values))
+            buy_block.append(values[3:6])
+            sell_block.append(values[8:11])
+
+        buy_changed = False
+        sell_changed = False
+        for item in items:
+            key = item["key"]
+            try:
+                result = item["result"]
+                if not isinstance(result, dict):
+                    print(f"❌ {item['side']} {key[0]}: no broker response; no broker status written.")
+                    continue
+
+                row_idx = int(item["row"]) - 2
+                if row_idx < 0 or row_idx >= len(panel):
+                    continue
+                side = item["side"]
+                block = buy_block if side == "BUY" else sell_block
+                prc_idx, status_idx, order_idx = 0, 1, 2
+
+                if result.get("norenordno"):
+                    order_no = normalize_order_no(result["norenordno"])
+                    block[row_idx][order_idx] = order_no
+                    submitted_prc = result.get("_submitted_prc") or result.get("prc")
+                    if submitted_prc not in ("", None):
+                        block[row_idx][prc_idx] = submitted_prc
+                    broker_status = result.get("status") or result.get("order_status")
+                    if broker_status:
+                        block[row_idx][status_idx] = normalize_order_status(broker_status)
+                    if side == "BUY":
+                        buy_changed = True
+                    else:
+                        sell_changed = True
+                    print(f"📋 Broker response for {side} {key[0]}: "
+                          f"{broker_status or 'Order number received'} | {order_no}")
+                elif result.get("local_error"):
+                    print(f"⚠️ Local submission error for {side} {key[0]}: "
+                          f"{result.get('emsg', 'Unknown error')}")
+                elif str(result.get("stat", "")).lower() in ("not_ok", "not ok") and result.get("emsg"):
+                    block[row_idx][status_idx] = "REJECTED | " + str(result["emsg"])
+                    if side == "BUY":
+                        buy_changed = True
+                    else:
+                        sell_changed = True
+                    print(f"📋 Broker rejected {side} {key[0]}: {result['emsg']}")
+                else:
+                    print(f"⚠️ No broker order number/status for {side} {key[0]}: {result}")
+            except Exception as exc:
+                print(f"Excel broker-result batch error for {key}: {exc}")
+            finally:
+                with order_inflight_lock:
+                    order_inflight.discard(key)
+
+        if buy_changed:
+            ws.range("U2:W200").value = buy_block
+        if sell_changed:
+            ws.range("Z2:AB200").value = sell_block
+    except Exception as exc:
+        print(f"Excel broker-result write error: {exc}")
 
 def reconcile_order_statuses():
-    """Fetch broker order book asynchronously; apply only broker-reported statuses."""
+    """Fetch the order book asynchronously and batch-apply broker status changes."""
     global last_order_reconcile, order_reconcile_future
     now = time.time()
     if order_reconcile_future is not None and order_reconcile_future.done():
@@ -1032,41 +1130,62 @@ def reconcile_order_statuses():
             orders = order_reconcile_future.result()
             if isinstance(orders, list):
                 ws = excel_name.sheets['symbols']
-                symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
                 panel = ws.range("R2:AB200").value or []
-                tracked = {}
-                for idx, row in enumerate(panel):
-                    row = list(row) if isinstance(row, (list, tuple)) else [row]
-                    row += [""] * (11 - len(row))
-                    row_num = idx + 2
-                    for order_index, status_index in ((5, 4), (10, 9)):
-                        order_no = normalize_order_no(row[order_index])
-                        if order_no:
-                            tracked[order_no] = (row_num, ORDER_COLS[status_index], ORDER_COLS[order_index],
-                                                 str(row[status_index] or ""))
+                buy_block = []
+                sell_block = []
+                order_rows = {}
+                for row_idx, row in enumerate(panel):
+                    values = list(row) if isinstance(row, (list, tuple)) else [row]
+                    values += [""] * (11 - len(values))
+                    buy_block.append(values[3:6])
+                    sell_block.append(values[8:11])
+                    buy_no = normalize_order_no(values[5])
+                    sell_no = normalize_order_no(values[10])
+                    if buy_no:
+                        order_rows[buy_no] = (row_idx, "BUY")
+                    if sell_no:
+                        order_rows[sell_no] = (row_idx, "SELL")
+
+                buy_changed = False
+                sell_changed = False
                 for broker_order in orders:
                     if not isinstance(broker_order, dict):
                         continue
-                    order_no = normalize_order_no(broker_order.get('norenordno'))
-                    target = tracked.get(order_no)
+                    order_no = normalize_order_no(broker_order.get("norenordno"))
+                    target = order_rows.get(order_no)
                     if not target:
                         continue
-                    row_num, status_col, order_col, old_status = target
-                    prc_col = ORDER_COLS[3] if status_col == ORDER_COLS[4] else ORDER_COLS[8]
-                    broker_prc = broker_order.get('prc') or broker_order.get('price')
-                    if broker_prc not in ('', None):
-                        ws.range(f"{prc_col}{row_num}").value = broker_prc
-                    broker_status = broker_order.get('status') or broker_order.get('order_status')
+                    row_idx, side = target
+                    block = buy_block if side == "BUY" else sell_block
+                    broker_prc = broker_order.get("prc") or broker_order.get("price")
+                    if broker_prc not in ("", None):
+                        block[row_idx][0] = broker_prc
+                        if side == "BUY":
+                            buy_changed = True
+                        else:
+                            sell_changed = True
+
+                    broker_status = broker_order.get("status") or broker_order.get("order_status")
                     if not broker_status:
                         continue
                     new_status = order_status_text(broker_order)
-                    old_base = normalize_order_status(old_status.split('|')[0].strip()) if old_status else ''
+                    old_status = str(block[row_idx][1] or "")
+                    old_base = normalize_order_status(old_status.split("|")[0].strip()) if old_status else ""
                     new_base = normalize_order_status(broker_status)
-                    final_states = ('COMPLETE', 'REJECTED', 'CANCELED')
+                    final_states = ("COMPLETE", "REJECTED", "CANCELED")
                     if old_base in final_states and new_base not in final_states:
                         continue
                     if new_status != old_status:
-                        ws.range(f"{status_col}{row_num}").value = new_status
+                        block[row_idx][1] = new_status
+                        if side == "BUY":
+                            buy_changed = True
+                        else:
+                            sell_changed = True
+
+                if buy_changed:
+                    ws.range("U2:W200").value = buy_block
+                if sell_changed:
+                    ws.range("Z2:AB200").value = sell_block
         except Exception as exc:
             print(f"Broker order-book read/apply error: {exc}")
         finally:
@@ -1077,7 +1196,12 @@ def reconcile_order_statuses():
         order_reconcile_future = order_executor.submit(api.get_order_book)
 
 def check_order_signals():
-    """Bulk-scan manual inputs; submit independently per symbol without Excel-side flags."""
+    """Bulk-scan manual inputs; both sides use the one shared type in column T."""
+    global last_order_signal_scan
+    now = time.monotonic()
+    if now - last_order_signal_scan < 0.2:
+        return
+    last_order_signal_scan = now
     try:
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
@@ -1108,7 +1232,7 @@ def check_order_signals():
 
             for side, trigger_index, type_index, status_index, order_index in (
                 ("BUY", 1, 2, 4, 5),
-                ("SELL", 6, 7, 9, 10)
+                ("SELL", 6, 2, 9, 10)
             ):
                 trigger = str(row[trigger_index] or '').strip().upper()
                 broker_status = str(row[status_index] or '').strip()
@@ -1443,6 +1567,28 @@ def migrate_legacy_layout(ws):
         print(f"⚠️ Workbook layout migration skipped: {exc}")
 
 
+def consolidate_shared_order_type(ws):
+    """Use T as the single CNC/MIS selector for both BUY and SELL; retain column Y."""
+    try:
+        buy_types = ws.range("T2:T200").value or []
+        sell_types = ws.range("Y2:Y200").value or []
+        merged = []
+        changed_t = False
+        for idx in range(199):
+            buy_value = buy_types[idx] if idx < len(buy_types) else None
+            sell_value = sell_types[idx] if idx < len(sell_types) else None
+            if buy_value in (None, "") and sell_value not in (None, ""):
+                buy_value = sell_value
+                changed_t = True
+            merged.append([buy_value])
+        if changed_t:
+            ws.range("T2:T200").value = merged
+        if any(value not in (None, "") for value in sell_types):
+            ws.range("Y2:Y200").clear_contents()
+    except Exception as exc:
+        print(f"⚠️ Shared order-type migration skipped: {exc}")
+
+
 # ============================================
 # SETUP HEADERS - DYNAMIC
 # ============================================
@@ -1451,6 +1597,7 @@ def setup_excel_headers():
     try:
         ws = excel_name.sheets['symbols']
         migrate_legacy_layout(ws)
+        consolidate_shared_order_type(ws)
         # U and Z were local DONE flags in the previous version; they are obsolete.
         ws.range("U2:U200").clear_contents()
         ws.range("Z2:Z200").clear_contents()
