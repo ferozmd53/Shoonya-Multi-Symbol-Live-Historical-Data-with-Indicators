@@ -696,10 +696,21 @@ def Shoonya_login(auth_code_provider=None):
 
         age_seconds = -1
         try:
-            if cached_created_epoch not in (None, ""):
-                age_seconds = time.time() - float(cached_created_epoch)
+            if isinstance(cached_created_epoch, datetime):
+                created_at = cached_created_epoch
+                if created_at.tzinfo is not None:
+                    created_at = created_at.replace(tzinfo=None)
+                age_seconds = (datetime.now() - created_at).total_seconds()
+            elif cached_created_epoch not in (None, ""):
+                try:
+                    age_seconds = time.time() - float(cached_created_epoch)
+                except (TypeError, ValueError):
+                    created_at = datetime.fromisoformat(str(cached_created_epoch).strip())
+                    age_seconds = (datetime.now() - created_at.replace(tzinfo=None)).total_seconds()
             elif cached_created_iso:
                 created_at = cached_created_iso if isinstance(cached_created_iso, datetime) else datetime.fromisoformat(str(cached_created_iso).strip())
+                if created_at.tzinfo is not None:
+                    created_at = created_at.replace(tzinfo=None)
                 age_seconds = (datetime.now() - created_at).total_seconds()
         except Exception as exc:
             print(f"⚠️ Could not read saved OAuth token creation time: {exc}")
@@ -1538,7 +1549,7 @@ def check_new_symbols():
                             'ltp': 0, 'volume': 0,
                             'open': 0, 'high': 0, 'low': 0, 'close': 0,
                             'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
-                'indicator_dirty': False,
+                            'indicator_dirty': False,
                             'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
                             'buy': '', 'sell': '', 'signal': '',
                             'prev_close': 0,
@@ -1676,6 +1687,7 @@ def main(auth_code_provider=None):
                 'ltp': 0, 'volume': 0,
                 'open': 0, 'high': 0, 'low': 0, 'close': 0,
                 'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
+                'indicator_dirty': False,
                 'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
                 'buy': '', 'sell': '', 'signal': '',
                 'prev_close': 0,
