@@ -488,7 +488,7 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
                 'qty': int(qty),
                 'type': buy_sell.upper(),
                 'price': float(price),
-                'status': normalize_order_status(result.get('status') or 'PENDING'),
+                'status': normalize_order_status(result.get('status') or result.get('order_status') or ''),
                 'time': datetime.now().strftime('%H:%M:%S')
             }
             order_history.append(order_info)
@@ -743,7 +743,10 @@ def normalize_order_status(value):
 
 
 def order_status_text(order):
-    status = normalize_order_status(order.get('status') or order.get('order_status') or 'PENDING')
+    raw_status = order.get('status') or order.get('order_status')
+    if not raw_status:
+        return ''
+    status = normalize_order_status(raw_status)
     filled = order.get('fillshares') or order.get('filled_qty') or ''
     average = order.get('avgprc') or order.get('average_price') or ''
     reason = order.get('rejreason') or order.get('rejection_reason') or ''
@@ -789,7 +792,10 @@ def apply_order_update(order):
     new_status = order_status_text(order)
     old_status = str(ws.range(f"{status_col}{row_num}").value or '').upper()
     old_base = normalize_order_status(old_status.split('|')[0].strip()) if old_status else ''
-    new_base = normalize_order_status(order.get('status') or order.get('order_status') or 'PENDING')
+    raw_status = order.get('status') or order.get('order_status')
+    if not raw_status:
+        return
+    new_base = normalize_order_status(raw_status)
     final_states = ('COMPLETE', 'REJECTED', 'CANCELED')
     if old_base in final_states and new_base not in final_states:
         return
