@@ -760,14 +760,23 @@ def Shoonya_login(auth_code_provider=None):
             return 0
 
         api = ShoonyaApiPy()
-        result = api.getAccessToken(auth, secret, client_id, userid)
+        try:
+            result = api.getAccessToken(auth, secret, client_id, userid)
+        except Exception as exc:
+            print(f"⚠️ OAuth code exchange raised an error: {exc}")
+            result = None
+
         if not result and callable(auth_code_provider):
             print("⚠️ Saved AUTH code was rejected. Requesting one fresh OAuth code and retrying.")
             login_sheet.range('B7').value = ""
             auth = obtain_fresh_code()
             if auth:
                 api = ShoonyaApiPy()
-                result = api.getAccessToken(auth, secret, client_id, userid)
+                try:
+                    result = api.getAccessToken(auth, secret, client_id, userid)
+                except Exception as exc:
+                    print(f"❌ Fresh OAuth code exchange raised an error: {exc}")
+                    result = None
         if not result:
             print("❌ OAuth code exchange failed. No access token was returned.")
             return 0
