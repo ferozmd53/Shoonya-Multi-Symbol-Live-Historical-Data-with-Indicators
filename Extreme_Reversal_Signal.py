@@ -347,8 +347,8 @@ class Config:
     STOCH_LENGTH = 14
     STOCH_UPPER = 70
     STOCH_LOWER = 30
-    EXCEL_UPDATE_INTERVAL = 0.1          # Raw LTP/OHLCV refresh
-    INDICATOR_EXCEL_UPDATE_INTERVAL = 0.1
+    EXCEL_UPDATE_INTERVAL = 0.1          # All live B:Q fields refreshed together
+    INDICATOR_EXCEL_UPDATE_INTERVAL = 0.1  # Kept for compatibility; live fields share one write
     HIST_EXCEL_UPDATE_INTERVAL = 5.0
     LOAD_DAYS = 500
     KEEP_DAYS = 500
@@ -670,6 +670,16 @@ def Shoonya_login(auth_code_provider=None):
     try:
         login_sheet = excel_name.sheets['LOGIN']
         session_sheet = _ensure_sheet("SESSION")
+
+        # Make the saved OAuth-session storage visible in Excel.
+        # Values are retained in their existing cells; only labels are added.
+        session_sheet.range("A1").value = "SHOONYA OAUTH SESSION STORAGE"
+        session_sheet.range("A2").value = "ACCESS TOKEN (saved)"
+        session_sheet.range("A3").value = "SESSION CREATED"
+        session_sheet.range("A4").value = "ACCOUNT ID"
+        session_sheet.range("A6").value = "USER ID"
+        session_sheet.range("A:A").column_width = 30
+        session_sheet.range("B:B").column_width = 55
         client_id_value = login_sheet.range('B2').value
         userid_value = login_sheet.range('B3').value
         secret_value = login_sheet.range('B6').value
@@ -1285,46 +1295,49 @@ def subscribe_symbols(tokens_list):
 # ============================================
 
 def update_excel_bulk():
-    """Refresh raw B:G frequently; refresh indicators H:Q and history AC:AQ separately."""
+    """Write all live fields B:Q together; historical AC:AQ remains on its slower timer."""
     global last_excel_update, last_indicator_excel_update, last_hist_excel_update
     try:
         now = time.time()
-        raw_due = now - last_excel_update >= Config.EXCEL_UPDATE_INTERVAL
-        indicator_due = now - last_indicator_excel_update >= Config.INDICATOR_EXCEL_UPDATE_INTERVAL
+        live_due = now - last_excel_update >= Config.EXCEL_UPDATE_INTERVAL
         hist_due = now - last_hist_excel_update >= Config.HIST_EXCEL_UPDATE_INTERVAL
-        if not (raw_due or indicator_due or hist_due):
+        if not (live_due or hist_due):
             return
+
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
-        raw_rows, indicator_rows, hist_rows = [], [], []
+        live_rows, hist_rows = [], []
+
         for symbol_cell in symbols_data:
             if not symbol_cell:
-                if raw_due: raw_rows.append([''] * 6)
-                if indicator_due: indicator_rows.append([''] * 10)
-                if hist_due: hist_rows.append([''] * HIST_COUNT)
+                if live_due:
+                    live_rows.append([''] * LIVE_COUNT)
+                if hist_due:
+                    hist_rows.append([''] * HIST_COUNT)
                 continue
+
             try:
                 symbol = normalized_symbol_key(symbol_cell)
             except ValueError:
-                if raw_due: raw_rows.append([''] * 6)
-                if indicator_due: indicator_rows.append([''] * 10)
-                if hist_due: hist_rows.append([''] * HIST_COUNT)
+                if live_due:
+                    live_rows.append([''] * LIVE_COUNT)
+                if hist_due:
+                    hist_rows.append([''] * HIST_COUNT)
                 continue
+
             token_key = symbol_tokens.get(symbol)
             data = live_data.get(token_key) if token_key else None
             hist = historical_data_cache.get(symbol)
-            if raw_due:
-                raw_rows.append([
-                    data.get('ltp', 0) if data and data.get('ltp', 0) > 0 else '',
-                    data.get('open', 0) if data and data.get('open', 0) > 0 else '',
-                    data.get('high', 0) if data and data.get('high', 0) > 0 else '',
-                    data.get('low', 0) if data and data.get('low', 0) > 0 else '',
-                    data.get('close', 0) if data and data.get('close', 0) > 0 else '',
-                    data.get('volume', 0) if data and data.get('volume', 0) > 0 else ''
-                ])
-            if indicator_due:
+
+            if live_due:
                 if data:
-                    indicator_rows.append([
+                    live_rows.append([
+                        data.get('ltp', 0) if data.get('ltp', 0) > 0 else '',
+                        data.get('open', 0) if data.get('open', 0) > 0 else '',
+                        data.get('high', 0) if data.get('high', 0) > 0 else '',
+                        data.get('low', 0) if data.get('low', 0) > 0 else '',
+                        data.get('close', 0) if data.get('close', 0) > 0 else '',
+                        data.get('volume', 0) if data.get('volume', 0) > 0 else '',
                         data.get('rsi', ''), data.get('stoch_rsi', ''),
                         data.get('sma_stoch', ''), data.get('bb_upper', ''),
                         data.get('bb_middle', ''), data.get('bb_lower', ''),
@@ -1333,7 +1346,8 @@ def update_excel_bulk():
                         data['timestamp'].strftime('%H:%M:%S') if data.get('timestamp') else ''
                     ])
                 else:
-                    indicator_rows.append([''] * 10)
+                    live_rows.append([''] * LIVE_COUNT)
+
             if hist_due:
                 yesterday = hist['yesterday'] if hist else {}
                 hist_rows.append([
@@ -1346,20 +1360,17 @@ def update_excel_bulk():
                     yesterday.get('buy', ''), yesterday.get('sell', ''),
                     yesterday.get('signal', '')
                 ])
+
         if symbols_data:
             last_row = 1 + len(symbols_data)
-            if raw_due and raw_rows:
-                raw_start = Config.LIVE_START
-                raw_end = get_column_letter(get_column_number(raw_start) + 5)
-                ws.range(f"{raw_start}2:{raw_end}{last_row}").value = raw_rows
+            if live_due and live_rows:
+                ws.range(f"{Config.LIVE_START}2:{LIVE_END}{last_row}").value = live_rows
                 last_excel_update = now
-            if indicator_due and indicator_rows:
-                indicator_start = get_column_letter(get_column_number(Config.LIVE_START) + 6)
-                ws.range(f"{indicator_start}2:{LIVE_END}{last_row}").value = indicator_rows
                 last_indicator_excel_update = now
             if hist_due and hist_rows:
                 ws.range(f"{Config.HIST_START}2:{HIST_END}{last_row}").value = hist_rows
                 last_hist_excel_update = now
+
     except Exception as exc:
         print(f"Excel update error: {exc}")
 
@@ -1608,12 +1619,14 @@ def start_excel_loop():
                 check_new_symbols()
                 last_symbol_check = current
             
+            # Priority 1: publish the latest WebSocket prices and indicators first.
+            # Order REST calls already run in worker threads; their Excel results follow.
+            update_excel_bulk()
+
             process_order_updates()
             process_order_results()
             reconcile_order_statuses()
             check_order_signals()
-
-            update_excel_bulk()
             
             # Saving the workbook on every 30 loop passes caused frequent Excel stalls.
             # Persist live workbook changes on a slower interval instead.
