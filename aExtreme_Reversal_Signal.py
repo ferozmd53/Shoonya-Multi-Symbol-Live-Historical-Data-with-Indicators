@@ -10,6 +10,7 @@ import xlwings as xw
 import pandas as pd
 import string
 import warnings
+import inspect
 warnings.filterwarnings('ignore')
 
 # ============================================
@@ -19,6 +20,8 @@ warnings.filterwarnings('ignore')
 excel_name = xw.Book('symbols.xlsx')
 api = None
 feed_opened = False
+subscribed_tokens = set()
+last_tick_error = None
 live_data = {}
 symbol_tokens = {}
 token_symbols = {}
@@ -123,7 +126,7 @@ HIST_END = HIST_COLS[-1] if HIST_COLS else Config.HIST_START
 ORDER_END = ORDER_COLS[-1] if ORDER_COLS else Config.ORDER_START
 
 # Get ALL columns in order: A, LIVE, HIST, ORDERS
-ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + HIST_COLS + ORDER_COLS
+ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + ORDER_COLS + HIST_COLS
 
 # ============================================
 # API CLASS
@@ -634,29 +637,47 @@ def on_ticks(tick):
                 d['signal'] = signal
                 
     except Exception as e:
-        pass
+        global last_tick_error
+        message = f"{type(e).__name__}: {e}"
+        if message != last_tick_error:
+            print(f"⚠️ Tick callback error: {message}")
+            last_tick_error = message
 
 def on_open():
-    global feed_opened
+    global feed_opened, subscribed_tokens
     feed_opened = True
-    print("✅ WebSocket Connected")
+    subscribed_tokens.clear()
+    print("✅ Shoonya WebSocket authenticated and connected")
+    # Re-subscribe after every successful connection/reconnection.
+    if symbol_tokens:
+        subscribe_symbols(list(symbol_tokens.values()))
 
-def on_close():
-    global feed_opened
+def on_close(*args):
+    global feed_opened, subscribed_tokens
     feed_opened = False
-    print("❌ WebSocket Closed")
+    subscribed_tokens.clear()
+    print(f"❌ WebSocket Closed | details={args if args else 'not supplied by SDK'}")
+
+def on_ws_error(*args):
+    print(f"❌ WebSocket ERROR: {args}")
 
 def on_order(order):
     print(f"📋 Order Update: {order}")
 
 def subscribe_symbols(tokens_list):
+    global subscribed_tokens
     if not tokens_list:
         return
-    for i in range(0, len(tokens_list), 10):
+    unique_tokens = list(dict.fromkeys(str(token).strip() for token in tokens_list if token))
+    pending = [token for token in unique_tokens if token not in subscribed_tokens]
+    for i in range(0, len(pending), 10):
+        batch = pending[i:i+10]
         try:
-            api.subscribe(tokens_list[i:i+10])
+            result = api.subscribe(batch)
+            subscribed_tokens.update(batch)
+            print(f"📡 Subscribed {len(batch)} instruments: {batch}")
         except Exception as e:
-            pass
+            print(f"❌ Subscribe failed for {batch}: {type(e).__name__}: {e}")
         time.sleep(0.1)
 
 # ============================================
@@ -857,7 +878,10 @@ def update_excel_bulk():
             
             if data_rows:
                 start_col = 'B'
-                end_col = ALL_COLS[-1]
+                end_col = ALL_COLS[-1]  # AK: LIVE B-Q, ORDERS R-V, HISTORY W-AK
+                expected_width = get_column_number(end_col) - get_column_number(start_col) + 1
+                if any(len(row) != expected_width for row in data_rows):
+                    raise ValueError(f"Excel row width mismatch: expected {expected_width} columns B:{end_col}")
                 ws.range(f"{start_col}2:{end_col}{2 + len(data_rows) - 1}").value = data_rows
             
     except Exception as e:
@@ -1140,24 +1164,24 @@ def main():
     print("\nStarting WebSocket...")
     
     try:
-        api.start_websocket(
-            subscribe_callback=on_ticks,
-            order_update_callback=on_order,
-            socket_open_callback=on_open,
-            socket_close_callback=on_close
-        )
-        
-        for _ in range(15):
-            if feed_opened:
-                break
-            time.sleep(1)
-        
-        if feed_opened:
-            if symbol_tokens:
-                subscribe_symbols(list(symbol_tokens.values()))
-            start_excel_loop()
-        else:
-            print("❌ WebSocket failed!")
+        ws_callbacks = {
+            'subscribe_callback': on_ticks,
+            'order_update_callback': on_order,
+            'socket_open_callback': on_open,
+            'socket_close_callback': on_close,
+        }
+        # SDK versions differ: pass the error callback only when supported.
+        try:
+            if 'socket_error_callback' in inspect.signature(api.start_websocket).parameters:
+                ws_callbacks['socket_error_callback'] = on_ws_error
+        except (TypeError, ValueError):
+            pass
+        print(f"🔌 Starting Shoonya WebSocket with callbacks: {', '.join(ws_callbacks.keys())}")
+        api.start_websocket(**ws_callbacks)
+
+        # Keep Excel refresh alive even while the broker socket is reconnecting.
+        # on_open() subscribes all instruments again after each reconnect.
+        start_excel_loop()
             
     except Exception as e:
         print(f"❌ Error: {e}")
