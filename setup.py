@@ -1,13 +1,13 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators",
-    version="2.0.1",
+    name="shoonya-multi-symbol-live-historical-data",
+    version="2.0.2",
     author="ferozmd53",
-    description="Shoonya multi-symbol live and historical data with StochRSI and Bollinger Bands",
+    description="Shoonya multi-symbol live and historical data with Excel indicators",
     license="MIT",
     packages=find_packages(),
-    py_modules=["Extreme_Reversal_Signal", "get_auth", "instrument_master"],
+    py_modules=["Extreme_Reversal_Signal", "get_auth", "instrument_master", "run"],
     install_requires=[
         "NorenRestApiPy>=0.0.22",
         "xlwings>=0.30.0",
@@ -18,6 +18,11 @@ setup(
         "pyotp>=2.9.0",
         "websocket-client>=1.8.0",
     ],
+    entry_points={
+        "console_scripts": [
+            "shoonya-trader=run:main",
+        ],
+    },
     python_requires=">=3.8",
     include_package_data=True,
 )
