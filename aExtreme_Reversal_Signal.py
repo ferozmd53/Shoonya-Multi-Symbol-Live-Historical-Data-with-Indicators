@@ -397,39 +397,69 @@ def safe_int(value, default=0):
 # ============================================
 
 def Shoonya_login():
+    """
+    Exchange the one-time OAuth code for a Shoonya session.
+    Uses the documented GenAcsTok payload: code + checksum + uid.
+    LOGIN sheet: B2=CLIENT_ID, B3=USER_ID, B6=API SECRET, B7=AUTH CODE.
+    """
     global api
-    try:     
+    import hashlib
+    import requests
+
+    try:
         api = ShoonyaApiPy()
-        
-        try:
-            login_sheet = excel_name.sheets['LOGIN']
-            userid = login_sheet.range('B3').value
-            secret = login_sheet.range('B6').value
-            auth = login_sheet.range('B7').value
-            
-            if not userid or not secret or not auth:
-                return 0
-                
-            userid = str(userid).strip()
-            secret = str(secret).strip()
-            auth = str(auth).strip()
-            
-        except Exception as e:
+        login_sheet = excel_name.sheets['LOGIN']
+
+        client_id = str(login_sheet.range('B2').value or '').strip()
+        userid = str(login_sheet.range('B3').value or '').strip()
+        secret = str(login_sheet.range('B6').value or '').strip()
+        auth = str(login_sheet.range('B7').value or '').strip()
+
+        if not all([client_id, userid, secret, auth]):
+            print("❌ OAuth fields missing: check LOGIN!B2, B3, B6 and B7")
             return 0
-        
-        cred = {'client_id': f'{userid}_U', 'secret': secret, 'uid': userid}
-        result = api.getAccessToken(auth, secret, cred['client_id'], userid)
-        
-        if result:
-            acc_tok, usrid, ref_tok, actid = result
-            api.injectOAuthHeader(acc_tok, userid, actid)
-            print("✅ Login Successful!")
-            return 1
-        else:
-            print("❌ Login failed")
-            
+
+        checksum = hashlib.sha256(
+            (client_id + secret + auth).encode('utf-8')
+        ).hexdigest()
+
+        payload = {
+            'code': auth,
+            'checksum': checksum,
+            'uid': userid
+        }
+
+        endpoint = 'https://api.shoonya.com/NorenWClientAPI/GenAcsTok'
+        response = requests.post(
+            endpoint,
+            data={'jData': json.dumps(payload)},
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            timeout=30
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        if not isinstance(result, dict) or result.get('stat') != 'Ok':
+            print(f"❌ Shoonya token exchange failed: {result}")
+            print("   The OAuth code may already have been used or expired. Generate a fresh code.")
+            return 0
+
+        access_token = result.get('access_token') or result.get('susertoken')
+        returned_uid = result.get('uid') or result.get('USERID') or userid
+        actid = result.get('actid') or userid
+
+        if not access_token:
+            print("❌ Shoonya response did not contain an access token.")
+            return 0
+
+        api.injectOAuthHeader(access_token, returned_uid, actid)
+        print("✅ Login Successful! OAuth code exchanged and session header installed.")
+        return 1
+
+    except requests.RequestException as e:
+        print(f"❌ Shoonya token HTTP error: {e}")
     except Exception as e:
-        print(f"Login error: {e}")
+        print(f"❌ Login error: {e}")
     return 0
 
 # ============================================
