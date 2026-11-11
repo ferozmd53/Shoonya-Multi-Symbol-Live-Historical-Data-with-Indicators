@@ -627,11 +627,12 @@ def check_order_signals():
 
             qty_cell = ws.range(f"{qty_col}{row_num}").value
             try:
-                qty = int(float(qty_cell))
-                if qty <= 0:
-                    raise ValueError("quantity must be positive")
+                qty_value = float(qty_cell)
+                if not qty_value.is_integer() or qty_value <= 0:
+                    raise ValueError("quantity must be a positive whole number")
+                qty = int(qty_value)
             except (TypeError, ValueError):
-                print(f"⚠️ Skipping {symbol}: enter a valid positive quantity in {qty_col}{row_num}")
+                print(f"⚠️ Skipping {symbol}: enter a valid positive whole-number quantity in {qty_col}{row_num}")
                 continue
 
             buy_signal = ws.range(f"{buy_trigger_col}{row_num}").value
