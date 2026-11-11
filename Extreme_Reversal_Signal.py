@@ -657,42 +657,60 @@ def _validate_cached_shoonya_session(test_api):
         return False
 
 
+def _validate_cached_shoonya_session(test_api):
+    """Validate a restored access token with a harmless authenticated account request."""
+    try:
+        if not hasattr(test_api, "get_limits"):
+            return False
+        response = test_api.get_limits()
+        return isinstance(response, dict) and str(response.get("stat", "")).strip().lower() == "ok"
+    except Exception as exc:
+        print(f"Cached Shoonya session validation failed: {exc}")
+        return False
+
+
 def Shoonya_login():
     global api
     try:
         login_sheet = excel_name.sheets['LOGIN']
         session_sheet = _ensure_sheet("SESSION")
 
-        userid = login_sheet.range('B3').value
-        secret = login_sheet.range('B6').value
-        auth = login_sheet.range('B7').value
+        client_id_value = login_sheet.range('B2').value
+        userid_value = login_sheet.range('B3').value
+        secret_value = login_sheet.range('B6').value
+        auth_value = login_sheet.range('B7').value
 
-        if not userid or not secret:
+        if not userid_value or not secret_value:
             print("❌ LOGIN sheet is missing USER_ID (B3) or API_SECRET (B6).")
             return 0
 
-        userid = str(userid).strip()
-        secret = str(secret).strip()
-        client_id = f"{userid}_U"
+        userid = str(userid_value).strip()
+        secret = str(secret_value).strip()
+        client_id = str(client_id_value).strip() if client_id_value else f"{userid}_U"
 
-        # First reuse today's saved token if it is still within its 24-hour
-        # lifetime, then verify it against Shoonya before starting a new OAuth flow.
-        cached_token = session_sheet.range('B1').value
-        cached_created = session_sheet.range('B3').value
-        cached_actid = session_sheet.range('B4').value
+        # Prefer the user's LOGIN sheet fields; fall back to the earlier SESSION sheet
+        # so an existing installation does not lose its already-saved valid session.
+        cached_token = login_sheet.range('B9').value or session_sheet.range('B1').value
+        cached_created_epoch = login_sheet.range('B12').value
+        cached_created_iso = session_sheet.range('B3').value
+        cached_actid = login_sheet.range('B13').value or session_sheet.range('B4').value
         cached_uid = session_sheet.range('B6').value
 
-        if cached_token and cached_created and str(cached_uid or userid).strip() == userid:
-            try:
-                if isinstance(cached_created, datetime):
-                    created_at = cached_created
+        age_seconds = -1
+        try:
+            if cached_created_epoch not in (None, ""):
+                age_seconds = time.time() - float(cached_created_epoch)
+            elif cached_created_iso:
+                if isinstance(cached_created_iso, datetime):
+                    created_at = cached_created_iso
                 else:
-                    created_at = datetime.fromisoformat(str(cached_created).strip())
+                    created_at = datetime.fromisoformat(str(cached_created_iso).strip())
                 age_seconds = (datetime.now() - created_at).total_seconds()
-            except Exception:
-                age_seconds = -1
+        except Exception:
+            age_seconds = -1
 
-            if 0 <= age_seconds < (23 * 60 * 60 + 50 * 60):
+        if cached_token and 0 <= age_seconds < (23 * 60 * 60 + 50 * 60):
+            if not cached_uid or str(cached_uid).strip() == userid:
                 api = ShoonyaApiPy()
                 api.injectOAuthHeader(
                     str(cached_token).strip(),
@@ -700,37 +718,54 @@ def Shoonya_login():
                     str(cached_actid or userid).strip()
                 )
                 if _validate_cached_shoonya_session(api):
+                    # Keep the visible LOGIN fields and legacy SESSION sheet in sync.
+                    login_sheet.range('B8').value = str(cached_token)
+                    login_sheet.range('B9').value = str(cached_token)
+                    login_sheet.range('B13').value = str(cached_actid or userid)
+                    session_sheet.range('B1').value = str(cached_token)
+                    session_sheet.range('B3').value = datetime.fromtimestamp(
+                        float(cached_created_epoch), tz=datetime.now().astimezone().tzinfo
+                    ).replace(tzinfo=None).isoformat(timespec="seconds") if cached_created_epoch not in (None, "") else cached_created_iso
+                    session_sheet.range('B4').value = str(cached_actid or userid)
+                    session_sheet.range('B6').value = userid
                     print("✅ Reusing valid Shoonya OAuth session. No new OAuth code required.")
                     return 1
                 print("⚠️ Saved Shoonya token is no longer accepted. Requesting fresh OAuth login.")
             else:
-                print("ℹ️ Saved Shoonya session is older than its 24-hour validity window.")
+                print("⚠️ Saved session belongs to a different USER_ID; not reusing it.")
 
-        # Auth codes are short-lived and single-use; only exchange a newly supplied
-        # code when the cached access-token session is absent, expired, or rejected.
+        auth = str(auth_value).strip() if auth_value else ""
         if not auth:
-            print("❌ No valid saved Shoonya session and LOGIN!B7 AUTH_CODE is blank.")
+            print("❌ No valid saved Shoonya session and LOGIN!B7 auth is blank. Generate a fresh OAuth code.")
             return 0
 
-        auth = str(auth).strip()
         api = ShoonyaApiPy()
         result = api.getAccessToken(auth, secret, client_id, userid)
-
         if not result:
-            print("❌ OAuth code exchange failed. Enter a fresh AUTH_CODE in LOGIN!B7.")
+            print("❌ OAuth code exchange failed. Enter a fresh auth code in LOGIN!B7.")
             return 0
 
-        acc_tok, usrid, ref_tok, actid = result
+        acc_tok, response_uid, ref_tok, actid = result
         if not acc_tok:
             print("❌ Shoonya did not return an access token.")
             return 0
 
         api.injectOAuthHeader(acc_tok, userid, actid or userid)
+        created_epoch = int(time.time())
+        created_iso = datetime.now().isoformat(timespec="seconds")
 
-        # Save only the session details needed to restore the same 24-hour
-        # session on the next run. Do not overwrite the existing WebSocket field B2.
+        # Exact LOGIN sheet layout supplied by the user:
+        # B8 user_token, B9 token, B12 session epoch, B13 account, B14 refresh token.
+        login_sheet.range('B8').value = str(acc_tok)
+        login_sheet.range('B9').value = str(acc_tok)
+        login_sheet.range('B12').value = created_epoch
+        login_sheet.range('B13').value = str(actid or userid)
+        login_sheet.range('B14').value = str(ref_tok) if ref_tok else ""
+
+        # Mirror the existing SESSION sheet for backward compatibility with the
+        # WebSocket and any other code that already reads its B1:B6 layout.
         session_sheet.range('B1').value = str(acc_tok)
-        session_sheet.range('B3').value = datetime.now().isoformat(timespec="seconds")
+        session_sheet.range('B3').value = created_iso
         session_sheet.range('B4').value = str(actid or userid)
         session_sheet.range('B6').value = userid
         try:
@@ -738,17 +773,15 @@ def Shoonya_login():
                 ["ACCESS_TOKEN"], ["WS_TOKEN"], ["CREATED_AT"],
                 ["ACCOUNT_ID"], ["REFRESH_TOKEN"], ["USER_ID"]
             ]
-            # Keep any previously stored refresh-token field untouched; current Shoonya
-            # retail OAuth documentation does not define a refresh-token renewal endpoint.
+            session_sheet.range('B5').value = str(ref_tok) if ref_tok else ""
             session_sheet.visible = False
         except Exception:
             pass
-        # Authorization codes are single-use. Clear the consumed code so it cannot
-        # accidentally be exchanged again after this saved session expires.
-        login_sheet.range("B7").value = ""
-        excel_name.save()
 
-        print("✅ New Shoonya OAuth session created and saved for reuse.")
+        # Authorization codes are single-use; clear only after successful exchange.
+        login_sheet.range('B7').value = ""
+        excel_name.save()
+        print("✅ New Shoonya OAuth session saved in LOGIN and SESSION sheets.")
         return 1
 
     except Exception as exc:
