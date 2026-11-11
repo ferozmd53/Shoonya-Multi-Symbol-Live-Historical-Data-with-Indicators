@@ -271,9 +271,6 @@ pending_order_updates = []
 order_update_lock = threading.Lock()
 order_result_queue = queue.Queue()
 order_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="ShoonyaOrder")
-indicator_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ShoonyaIndicators")
-indicator_inflight = set()
-indicator_inflight_lock = threading.Lock()
 order_inflight = set()
 order_inflight_lock = threading.Lock()
 order_reconcile_future = None
@@ -351,7 +348,7 @@ class Config:
     STOCH_UPPER = 70
     STOCH_LOWER = 30
     EXCEL_UPDATE_INTERVAL = 0.1          # Raw LTP/OHLCV refresh
-    INDICATOR_EXCEL_UPDATE_INTERVAL = 0.5
+    INDICATOR_EXCEL_UPDATE_INTERVAL = 0.1
     HIST_EXCEL_UPDATE_INTERVAL = 5.0
     LOAD_DAYS = 500
     KEEP_DAYS = 500
@@ -1144,120 +1141,115 @@ def check_order_signals():
 # WEBSOCKET CALLBACKS
 # ============================================
 
-def _calculate_live_indicators(symbol, ltp):
-    """Run the existing RSI/Stoch RSI/Bollinger calculations away from the tick callback."""
-    hist = historical_data_cache.get(symbol)
-    if not hist:
-        return None
-    all_closes = hist['all_closes'].copy()
-    all_closes.append(ltp)
-    df = pd.DataFrame({'close': all_closes})
-    delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    alpha = 1.0 / Config.RSI_LENGTH
-    avg_gain = gain.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
-    avg_loss = loss.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
-    rs = avg_gain / avg_loss
-    rsi = (100 - (100 / (1 + rs))).fillna(50)
-    rsi_low = rsi.rolling(Config.STOCH_LENGTH).min()
-    rsi_high = rsi.rolling(Config.STOCH_LENGTH).max()
-    stoch = (100 * (rsi - rsi_low) / (rsi_high - rsi_low)).fillna(50)
-    sma_stoch = stoch.rolling(3).mean()
-    sma = df['close'].rolling(Config.BB_LENGTH).mean()
-    stdev = df['close'].rolling(Config.BB_LENGTH).std(ddof=0)
-    bb_upper = sma + (Config.BB_STD * stdev)
-    bb_lower = sma - (Config.BB_STD * stdev)
-    latest_rsi = rsi.iloc[-1] if len(rsi) else 50
-    latest_stoch = stoch.iloc[-1] if len(stoch) else 50
-    latest_sma_stoch = sma_stoch.iloc[-1] if len(sma_stoch) else 50
-    latest_bb_upper = bb_upper.iloc[-1] if len(bb_upper) else 0
-    latest_bb_middle = sma.iloc[-1] if len(sma) else 0
-    latest_bb_lower = bb_lower.iloc[-1] if len(bb_lower) else 0
-    prev_bb_upper = bb_upper.iloc[-2] if len(bb_upper) >= 2 else latest_bb_upper
-    prev_bb_lower = bb_lower.iloc[-2] if len(bb_lower) >= 2 else latest_bb_lower
-    prev_close = all_closes[-2] if len(all_closes) >= 2 else ltp
-    prev_sma_stoch = sma_stoch.iloc[-2] if len(sma_stoch) >= 2 else latest_sma_stoch
-    buy_signal = prev_close < prev_bb_lower and ltp > latest_bb_lower and prev_sma_stoch < Config.STOCH_LOWER
-    sell_signal = prev_close > prev_bb_upper and ltp < latest_bb_upper and prev_sma_stoch > Config.STOCH_UPPER
-    return {
-        'rsi': round(latest_rsi, 2), 'stoch_rsi': round(latest_stoch, 2),
-        'sma_stoch': round(latest_sma_stoch, 2), 'bb_upper': round(latest_bb_upper, 2),
-        'bb_middle': round(latest_bb_middle, 2), 'bb_lower': round(latest_bb_lower, 2),
-        'prev_close': prev_close, 'prev_bb_upper': prev_bb_upper,
-        'prev_bb_lower': prev_bb_lower, 'prev_sma_stoch': prev_sma_stoch,
-        'buy': 1 if buy_signal else '', 'sell': 1 if sell_signal else '',
-        'signal': 'BUY' if buy_signal else ('SELL' if sell_signal else '')
-    }
-
-
-def _indicator_worker_done(future, token_key):
-    try:
-        values = future.result()
-        if values and token_key in live_data:
-            live_data[token_key].update(values)
-    except Exception as exc:
-        print(f"⚠️ Indicator calculation failed for {token_key}: {exc}")
-    finally:
-        with indicator_inflight_lock:
-            indicator_inflight.discard(token_key)
-
-
-def process_indicator_updates():
-    """Schedule indicator calculations separately so WebSocket LTP/OHLCV stays lightweight."""
-    for token_key, data in list(live_data.items()):
-        if not data.get('indicator_dirty') or data.get('ltp', 0) <= 0:
-            continue
-        symbol = data.get('symbol')
-        if not symbol or symbol not in historical_data_cache:
-            data['indicator_dirty'] = False
-            continue
-        with indicator_inflight_lock:
-            if token_key in indicator_inflight:
-                continue
-            indicator_inflight.add(token_key)
-            data['indicator_dirty'] = False
-        try:
-            future = indicator_executor.submit(_calculate_live_indicators, symbol, data.get('ltp', 0))
-            future.add_done_callback(lambda f, key=token_key: _indicator_worker_done(f, key))
-        except Exception as exc:
-            with indicator_inflight_lock:
-                indicator_inflight.discard(token_key)
-            data['indicator_dirty'] = True
-            print(f"⚠️ Could not schedule indicators for {token_key}: {exc}")
-
-
 def on_ticks(tick):
-    """Update raw market fields immediately; indicator work runs in separate workers."""
     global live_data, tick_count
+    
     try:
         if isinstance(tick, str):
             tick = json.loads(tick)
+        
         tick_count += 1
+        
         key = f"{tick['e']}|{tick['tk']}"
-        if key not in live_data:
-            return
-        data = live_data[key]
-        ltp = safe_float(tick.get('lp', data.get('ltp', 0)))
-        volume = safe_int(tick.get('v', data.get('volume', 0)))
-        open_price = safe_float(tick.get('o', data.get('open', 0)))
-        if data.get('first_tick', True):
-            data['first_tick'] = False
-            data['open'] = open_price if open_price > 0 else ltp
-            data['high'] = ltp
-            data['low'] = ltp
-        if ltp > data.get('high', 0):
-            data['high'] = ltp
-        if ltp < data.get('low', 999999):
-            data['low'] = ltp
-        data['ltp'] = ltp
-        data['volume'] = volume
-        data['timestamp'] = datetime.now()
-        data['close'] = ltp
-        data['indicator_dirty'] = True
-    except Exception as exc:
-        print(f"⚠️ WebSocket tick update error: {type(exc).__name__}: {exc}")
-
+        
+        if key in live_data:
+            d = live_data[key]
+            ltp = safe_float(tick.get('lp', d.get('ltp', 0)))
+            volume = safe_int(tick.get('v', d.get('volume', 0)))
+            open_price = safe_float(tick.get('o', d.get('open', 0)))
+            
+            symbol = d['symbol']
+            
+            if d.get('first_tick', True):
+                d['first_tick'] = False
+                d['open'] = open_price if open_price > 0 else ltp
+                d['high'] = ltp
+                d['low'] = ltp
+            
+            if ltp > d.get('high', 0):
+                d['high'] = ltp
+            if ltp < d.get('low', 999999):
+                d['low'] = ltp
+            
+            d['ltp'] = ltp
+            d['volume'] = volume
+            d['timestamp'] = datetime.now()
+            d['close'] = ltp
+            
+            hist = historical_data_cache.get(symbol)
+            
+            if hist:
+                all_closes = hist['all_closes'].copy()
+                all_closes.append(ltp)
+                
+                df = pd.DataFrame({'close': all_closes})
+                
+                delta = df['close'].diff()
+                gain = delta.where(delta > 0, 0.0)
+                loss = -delta.where(delta < 0, 0.0)
+                alpha = 1.0 / Config.RSI_LENGTH
+                avg_gain = gain.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
+                avg_loss = loss.ewm(alpha=alpha, adjust=False, ignore_na=True).mean()
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+                rsi = rsi.fillna(50)
+                
+                rsi_low = rsi.rolling(Config.STOCH_LENGTH).min()
+                rsi_high = rsi.rolling(Config.STOCH_LENGTH).max()
+                stoch = 100 * (rsi - rsi_low) / (rsi_high - rsi_low)
+                stoch = stoch.fillna(50)
+                sma_stoch = stoch.rolling(3).mean()
+                
+                sma = df['close'].rolling(Config.BB_LENGTH).mean()
+                stdev = df['close'].rolling(Config.BB_LENGTH).std(ddof=0)
+                bb_upper = sma + (Config.BB_STD * stdev)
+                bb_lower = sma - (Config.BB_STD * stdev)
+                
+                latest_rsi = rsi.iloc[-1] if len(rsi) > 0 else 50
+                latest_stoch = stoch.iloc[-1] if len(stoch) > 0 else 50
+                latest_sma_stoch = sma_stoch.iloc[-1] if len(sma_stoch) > 0 else 50
+                latest_bb_upper = bb_upper.iloc[-1] if len(bb_upper) > 0 else 0
+                latest_bb_middle = sma.iloc[-1] if len(sma) > 0 else 0
+                latest_bb_lower = bb_lower.iloc[-1] if len(bb_lower) > 0 else 0
+                
+                prev_bb_upper = bb_upper.iloc[-2] if len(bb_upper) >= 2 else latest_bb_upper
+                prev_bb_lower = bb_lower.iloc[-2] if len(bb_lower) >= 2 else latest_bb_lower
+                prev_close = all_closes[-2] if len(all_closes) >= 2 else ltp
+                prev_sma_stoch = sma_stoch.iloc[-2] if len(sma_stoch) >= 2 else latest_sma_stoch
+                
+                d['rsi'] = round(latest_rsi, 2)
+                d['stoch_rsi'] = round(latest_stoch, 2)
+                d['sma_stoch'] = round(latest_sma_stoch, 2)
+                d['bb_upper'] = round(latest_bb_upper, 2)
+                d['bb_middle'] = round(latest_bb_middle, 2)
+                d['bb_lower'] = round(latest_bb_lower, 2)
+                d['prev_close'] = prev_close
+                d['prev_bb_upper'] = prev_bb_upper
+                d['prev_bb_lower'] = prev_bb_lower
+                d['prev_sma_stoch'] = prev_sma_stoch
+                
+                buy_signal = False
+                sell_signal = False
+                signal = ""
+                
+                if (prev_close < prev_bb_lower and 
+                    ltp > latest_bb_lower and 
+                    prev_sma_stoch < Config.STOCH_LOWER):
+                    buy_signal = True
+                    signal = "BUY"
+                
+                elif (prev_close > prev_bb_upper and 
+                      ltp < latest_bb_upper and 
+                      prev_sma_stoch > Config.STOCH_UPPER):
+                    sell_signal = True
+                    signal = "SELL"
+                
+                d['buy'] = 1 if buy_signal else ''
+                d['sell'] = 1 if sell_signal else ''
+                d['signal'] = signal
+                
+    except Exception as e:
+        pass
 
 def on_open():
     global feed_opened
@@ -1558,8 +1550,7 @@ def check_new_symbols():
                             'ltp': 0, 'volume': 0,
                             'open': 0, 'high': 0, 'low': 0, 'close': 0,
                             'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
-                            'indicator_dirty': False,
-                            'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
+                                        'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
                             'buy': '', 'sell': '', 'signal': '',
                             'prev_close': 0,
                             'prev_bb_upper': 0,
@@ -1621,7 +1612,6 @@ def start_excel_loop():
             process_order_results()
             reconcile_order_statuses()
             check_order_signals()
-            process_indicator_updates()
 
             update_excel_bulk()
             
