@@ -432,12 +432,17 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C'):
         buy_or_sell = 'B' if buy_sell.upper() == 'BUY' else 'S'
 
         if price <= 0:
-            current_price = live_data.get(tk, {}).get('ltp', 0)
-            if current_price > 0:
-                price = current_price + 5 if buy_sell.upper() == 'BUY' else max(0.05, current_price - 5)
+            if tk and tk in live_data:
+                current_price = live_data[tk].get('ltp', 0)
+                if current_price > 0:
+                    if buy_sell.upper() == 'BUY':
+                        price = current_price + 5
+                    else:
+                        price = current_price - 5
+                else:
+                    price = 100
             else:
-                print("❌ No live LTP available; refusing to submit an estimated-price order.")
-                return None
+                price = 100
 
         login_sheet = excel_name.sheets['LOGIN']
         algo_id_value = login_sheet.range('B2').value
