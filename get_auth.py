@@ -351,7 +351,7 @@ def get_auth_code():
             time.sleep(3)
 
             totp = pyotp.TOTP(totp_sec).now()
-            print(f"\nComputed TOTP: {totp}")
+            print("\nTOTP generated (value hidden for security).")
 
             for which, val, label in [
                 ("user",     uid,  "User ID"),
@@ -362,8 +362,8 @@ def get_auth_code():
                 r = cdp.evaluate(_FILL_JS.replace(
                     "__ARGS__", json.dumps({"which": which, "value": val})))
                 if not r or not r.get("ok") or r.get("got", "").strip() != val.strip():
-                    raise RuntimeError(f"{label} fill failed: {r}")
-                shown = "*" * len(val) if which == "password" else val
+                    raise RuntimeError(f"{label} fill failed; field details hidden for security.")
+                shown = "*" * len(val) if which in ("password", "totp") else val
                 print(f"✅ {shown}  ({r.get('matchedBy')}, id={r.get('id')!r})")
                 if INPUT_FILL_DELAY_SEC > 0:
                     print(f"     ⏳ {INPUT_FILL_DELAY_SEC:.0f}s…")
