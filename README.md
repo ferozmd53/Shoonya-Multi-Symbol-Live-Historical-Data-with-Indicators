@@ -16,7 +16,7 @@ Python application for Shoonya market data, multi-symbol Excel monitoring, Stoch
 **One command installs the application and its Python dependencies:**
 
 ```powershell
-py -m pip install --upgrade "git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git"
+pip install --upgrade "git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git"
 ```
 
 After installation, start it from Command Prompt or PowerShell with:
@@ -34,7 +34,7 @@ py -m run
 To update to the latest version later:
 
 ```powershell
-py -m pip install --upgrade --force-reinstall "git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git"
+pip install --upgrade --force-reinstall "git+https://github.com/ferozmd53/Shoonya-Multi-Symbol-Live-Historical-Data-with-Indicators.git"
 ```
 
 ### Requirements before first run
@@ -51,8 +51,8 @@ If Git is not installed, install Git for Windows first, restart the terminal, an
 If you prefer to work from a cloned source folder:
 
 ```powershell
-py -m pip install -r requirements.txt
-py -m pip install -e .
+pip install -r requirements.txt
+pip install -e .
 ```
 
 ## Local workbook
