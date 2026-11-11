@@ -246,7 +246,7 @@ HIST_END = HIST_COLS[-1] if HIST_COLS else Config.HIST_START
 ORDER_END = ORDER_COLS[-1] if ORDER_COLS else Config.ORDER_START
 
 # Get ALL columns in order: A, LIVE, HIST, ORDERS
-ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + HIST_COLS + ORDER_COLS
+ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + ORDER_COLS + HIST_COLS
 
 # ============================================
 # API CLASS
@@ -291,49 +291,65 @@ def tradingview_bb(close, length=20, std=2.0):
 # PLACE ORDER FUNCTION
 # ============================================
 
-def place_order(symbol, qty, buy_sell, price=0, product_type='C'):
+def place_order(symbol, qty, buy_sell, price=0, product_type='C', excel_row=None):
+    """Submit a validated limit order; broker updates determine its final status."""
     try:
         if symbol not in symbol_tokens:
             print(f"❌ Symbol {symbol} not found")
             return None
-            
+
+        side = str(buy_sell or "").strip().upper()
+        if side not in ("BUY", "SELL"):
+            print(f"❌ Invalid order side: {buy_sell!r}")
+            return None
+
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            print(f"❌ Invalid quantity for {symbol}: {qty!r}")
+            return None
+        if qty <= 0:
+            print(f"❌ Quantity must be greater than zero for {symbol}")
+            return None
+
         tk = symbol_tokens[symbol]
         exchange, tradingsymbol = parse_symbol_input(symbol)
-        
-        print(f"📊 Placing {buy_sell} order: {qty} shares of {symbol}")
-        
-        buy_or_sell = 'B' if buy_sell.upper() == 'BUY' else 'S'
-        
+        print(f"📊 Placing {side} order: {qty} shares of {symbol}")
+
+        try:
+            price = float(price or 0)
+        except (TypeError, ValueError):
+            print(f"❌ Invalid limit price for {symbol}: {price!r}")
+            return None
+
         if price <= 0:
-            if tk and tk in live_data:
-                current_price = live_data[tk].get('ltp', 0)
-                if current_price > 0:
-                    if buy_sell.upper() == 'BUY':
-                        price = current_price + 5
-                    else:
-                        price = current_price - 5
-                else:
-                    price = 100
-            else:
-                price = 100
-        
+            current_price = safe_float(live_data.get(tk, {}).get('ltp', 0))
+            if current_price <= 0:
+                print(f"❌ No valid live LTP for {symbol}; order not sent")
+                return None
+            price = current_price + 5 if side == "BUY" else current_price - 5
+
+        if price <= 0:
+            print(f"❌ Calculated limit price is invalid for {symbol}: {price}")
+            return None
+
         login_sheet = excel_name.sheets['LOGIN']
         algo_id = login_sheet.range('B2').value
         algo_id = str(algo_id).strip() if algo_id else ''
-        
         if not algo_id:
-            print("❌ algo_id not found in Excel B2 (CLIENT_ID)")
+            print("❌ algo_id not found in Excel LOGIN!B2")
             return None
-        
+
+        # Shoonya expects B or S, not the words BUY or SELL.
         order_params = {
-            'buy_or_sell': buy_or_sell,
+            'buy_or_sell': 'B' if side == 'BUY' else 'S',
             'product_type': product_type,
             'exchange': exchange,
             'tradingsymbol': tradingsymbol,
             'quantity': qty,
             'discloseqty': 0,
             'price_type': 'LMT',
-            'price': str(price),
+            'price': str(round(price, 2)),
             'trigger_price': None,
             'retention': 'DAY',
             'amo': None,
@@ -343,31 +359,28 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C'):
             'trail_price': 0.0,
             'algo_id': algo_id
         }
-        
-        print(f"📋 Order Params: {order_params}")
-        
+
         result = api.place_order(**order_params)
-        
         print(f"📋 API Response: {result}")
-        
+
         if result and result.get('norenordno'):
-            order_info = {
-                'order_no': result['norenordno'],
+            order_no = str(result['norenordno'])
+            order_history.append({
+                'order_no': order_no,
                 'symbol': symbol,
                 'qty': qty,
-                'type': buy_sell,
+                'type': side,
                 'price': price,
-                'status': result.get('status', 'PENDING'),
+                'status': 'SUBMITTED',
+                'excel_row': excel_row,
                 'time': datetime.now().strftime('%H:%M:%S')
-            }
-            order_history.append(order_info)
-            print(f"✅ Order placed: {buy_sell} {qty} of {symbol}")
-            print(f"   Order No: {result['norenordno']}")
-            return result['norenordno']
-        else:
-            print(f"❌ Order failed: {result}")
-            return None
-            
+            })
+            print(f"📨 Order submitted: {side} {qty} {symbol} | Order No: {order_no}")
+            return order_no
+
+        print(f"❌ Broker did not return an order number; order not confirmed: {result}")
+        return None
+
     except Exception as e:
         print(f"❌ Error placing order: {e}")
         return None
@@ -394,10 +407,12 @@ def fetch_historical_data(symbol):
         
         parsed_data = []
         for item in ret:
-            if isinstance(item, str):
+            if isinstance(item, dict):
+                parsed_data.append(item)
+            elif isinstance(item, str):
                 try:
                     parsed_data.append(json.loads(item))
-                except:
+                except (TypeError, ValueError, json.JSONDecodeError):
                     continue
         
         if not parsed_data:
@@ -591,22 +606,16 @@ def check_order_signals():
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value
         if not symbols_data:
             return
-        
-        # Get order columns dynamically
+
         order_cols = ORDER_COLS
-        if len(order_cols) >= 5:
-            qty_col = order_cols[0]
-            buy_trigger_col = order_cols[1]
-            buy_status_col = order_cols[2]
-            sell_trigger_col = order_cols[3]
-            sell_status_col = order_cols[4]
-        else:
+        if len(order_cols) < 5:
             return
-        
+        qty_col, buy_trigger_col, buy_status_col, sell_trigger_col, sell_status_col = order_cols
+
         for idx, symbol_cell in enumerate(symbols_data):
             if not symbol_cell:
                 continue
-            
+
             row_num = idx + 2
             try:
                 symbol = normalized_symbol_key(symbol_cell)
@@ -615,44 +624,41 @@ def check_order_signals():
                 continue
             if symbol not in symbol_tokens:
                 continue
-            
+
             qty_cell = ws.range(f"{qty_col}{row_num}").value
-            qty = int(float(qty_cell)) if qty_cell and str(qty_cell).replace('.', '').isdigit() else 1
-            
-            # Check BUY
+            try:
+                qty_value = float(qty_cell)
+                if not qty_value.is_integer() or qty_value <= 0:
+                    raise ValueError("quantity must be a positive whole number")
+                qty = int(qty_value)
+            except (TypeError, ValueError):
+                print(f"⚠️ Skipping {symbol}: enter a valid positive whole-number quantity in {qty_col}{row_num}")
+                continue
+
             buy_signal = ws.range(f"{buy_trigger_col}{row_num}").value
             buy_status = ws.range(f"{buy_status_col}{row_num}").value
-            
-            if buy_signal:
-                buy_signal = str(buy_signal).strip().upper()
-            
-            if buy_signal == "BUY" and not buy_status:
+            if str(buy_signal or "").strip().upper() == "BUY" and not buy_status:
                 print(f"\n🔔 BUY Signal detected for {symbol} (Qty: {qty})")
-                order_no = place_order(symbol, qty, "BUY", price=0, product_type='C')
+                order_no = place_order(symbol, qty, "BUY", price=0, product_type='C', excel_row=row_num)
                 if order_no:
-                    ws.range(f"{buy_status_col}{row_num}").value = f"Bought: {order_no}"
+                    ws.range(f"{buy_status_col}{row_num}").value = f"SUBMITTED: {order_no}"
                     ws.range(f"{buy_trigger_col}{row_num}").value = "DONE"
                 else:
-                    ws.range(f"{buy_status_col}{row_num}").value = "Failed"
+                    ws.range(f"{buy_status_col}{row_num}").value = "FAILED - see console"
                     ws.range(f"{buy_trigger_col}{row_num}").value = "FAILED"
-            
-            # Check SELL
+
             sell_signal = ws.range(f"{sell_trigger_col}{row_num}").value
             sell_status = ws.range(f"{sell_status_col}{row_num}").value
-            
-            if sell_signal:
-                sell_signal = str(sell_signal).strip().upper()
-            
-            if sell_signal == "SELL" and not sell_status:
+            if str(sell_signal or "").strip().upper() == "SELL" and not sell_status:
                 print(f"\n🔔 SELL Signal detected for {symbol} (Qty: {qty})")
-                order_no = place_order(symbol, qty, "SELL", price=0, product_type='C')
+                order_no = place_order(symbol, qty, "SELL", price=0, product_type='C', excel_row=row_num)
                 if order_no:
-                    ws.range(f"{sell_status_col}{row_num}").value = f"Sold: {order_no}"
+                    ws.range(f"{sell_status_col}{row_num}").value = f"SUBMITTED: {order_no}"
                     ws.range(f"{sell_trigger_col}{row_num}").value = "DONE"
                 else:
-                    ws.range(f"{sell_status_col}{row_num}").value = "Failed"
+                    ws.range(f"{sell_status_col}{row_num}").value = "FAILED - see console"
                     ws.range(f"{sell_trigger_col}{row_num}").value = "FAILED"
-                    
+
     except Exception as e:
         print(f"Order signal error: {e}")
 
@@ -781,7 +787,41 @@ def on_close():
     print("❌ WebSocket Closed")
 
 def on_order(order):
-    print(f"📋 Order Update: {order}")
+    """Apply broker order updates to the matching Excel order-status cell."""
+    try:
+        if isinstance(order, str):
+            order = json.loads(order)
+        if not isinstance(order, dict):
+            print(f"⚠️ Ignoring unrecognized order update: {type(order).__name__}")
+            return
+
+        order_no = str(order.get('norenordno') or order.get('order_no') or '').strip()
+        if not order_no:
+            print(f"⚠️ Order update has no order number: {order}")
+            return
+
+        tracked = next((item for item in reversed(order_history)
+                        if str(item.get('order_no')) == order_no), None)
+        status = str(order.get('status') or order.get('stat') or 'UNKNOWN').strip().upper()
+        reason = str(order.get('rejreason') or order.get('reason') or '').strip()
+
+        if tracked:
+            tracked['status'] = status
+            row_num = tracked.get('excel_row')
+            if row_num:
+                status_col = ORDER_COLS[2] if tracked.get('type') == 'BUY' else ORDER_COLS[4]
+                status_text = f"{status}: {order_no}"
+                if reason:
+                    status_text += f" | {reason}"
+                try:
+                    excel_name.sheets['symbols'].range(f"{status_col}{row_num}").value = status_text
+                except Exception as excel_error:
+                    print(f"⚠️ Could not write broker status to Excel: {excel_error}")
+
+        print(f"📋 Broker order update: {order_no} | {status}" +
+              (f" | {reason}" if reason else ""))
+    except Exception as e:
+        print(f"❌ Order-update handler error: {e}")
 
 def subscribe_symbols(tokens_list):
     if not tokens_list:

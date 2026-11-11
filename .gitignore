@@ -1,9 +1,21 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
 dist/
 build/
+
+# IDE
 .vscode/
 .idea/
+
+# Local trading workbooks and credentials (do not commit login data)
 *.xlsx
+*.xlsm
+.env
+.env.*
+access_token.txt
+
+# Local instrument cache and runtime logs
+Instrument/
+*.log
