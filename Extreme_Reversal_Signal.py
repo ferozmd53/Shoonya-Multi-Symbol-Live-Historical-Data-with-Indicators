@@ -736,12 +736,16 @@ def Shoonya_login():
         try:
             session_sheet.range('A1:A6').value = [
                 ["ACCESS_TOKEN"], ["WS_TOKEN"], ["CREATED_AT"],
-                ["ACCOUNT_ID"], ["REFRESH_TOKEN_NOT_SUPPORTED"], ["USER_ID"]
+                ["ACCOUNT_ID"], ["REFRESH_TOKEN"], ["USER_ID"]
             ]
-            session_sheet.range('B5').value = ""
+            # Keep any previously stored refresh-token field untouched; current Shoonya
+            # retail OAuth documentation does not define a refresh-token renewal endpoint.
             session_sheet.visible = False
         except Exception:
             pass
+        # Authorization codes are single-use. Clear the consumed code so it cannot
+        # accidentally be exchanged again after this saved session expires.
+        login_sheet.range("B7").value = ""
         excel_name.save()
 
         print("✅ New Shoonya OAuth session created and saved for reuse.")
