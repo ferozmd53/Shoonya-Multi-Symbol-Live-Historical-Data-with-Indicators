@@ -726,8 +726,13 @@ def Shoonya_login(auth_code_provider=None):
                         login_sheet.range('B9').value = str(cached_token)
                         login_sheet.range('B13').value = str(cached_actid or userid)
                         session_sheet.range('B1').value = str(cached_token)
-                        if cached_created_epoch not in (None, ""):
-                            session_sheet.range('B3').value = datetime.fromtimestamp(float(cached_created_epoch)).isoformat(timespec="seconds")
+                        if isinstance(cached_created_epoch, datetime):
+                            session_sheet.range('B3').value = cached_created_epoch.isoformat(timespec="seconds")
+                        elif cached_created_epoch not in (None, ""):
+                            try:
+                                session_sheet.range('B3').value = datetime.fromtimestamp(float(cached_created_epoch)).isoformat(timespec="seconds")
+                            except (TypeError, ValueError):
+                                session_sheet.range('B3').value = cached_created_iso
                         else:
                             session_sheet.range('B3').value = cached_created_iso
                         session_sheet.range('B4').value = str(cached_actid or userid)
