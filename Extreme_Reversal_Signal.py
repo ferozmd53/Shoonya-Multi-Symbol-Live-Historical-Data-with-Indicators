@@ -1194,10 +1194,80 @@ def update_excel_bulk():
 
 
 # ============================================
+# ONE-TIME WORKBOOK COLUMN MIGRATION
+# ============================================
+
+def migrate_legacy_layout(ws):
+    """Preserve the previous R:X orders and Y:AM history when expanding orders to R:AB."""
+    try:
+        old_headers = ws.range("S1:X1").value
+        if not old_headers or len(old_headers) < 6:
+            return
+        normalized = [str(v or "").strip().upper() for v in old_headers]
+        legacy_order_layout = normalized == [
+            "BUY TRIGGER", "BUY STATUS", "BUY ORDER NO",
+            "SELL TRIGGER", "SELL STATUS", "SELL ORDER NO"
+        ]
+        if not legacy_order_layout:
+            return
+
+        old_orders = ws.range("R2:X200").value or []
+        old_history = ws.range("Y2:AM200").value or []
+        migrated_orders = []
+
+        for row in old_orders:
+            row = list(row) if isinstance(row, (list, tuple)) else [row]
+            row += [""] * (7 - len(row))
+            qty, old_buy, old_buy_status, old_buy_no, old_sell, old_sell_status, old_sell_no = row[:7]
+
+            buy_value = str(old_buy or "").strip().upper()
+            buy_status_value = str(old_buy_status or "").strip().upper()
+            if buy_value in ("BUY", "DONE", "FAILED"):
+                buy_trigger = "BUY" if buy_value == "BUY" else ""
+                buy_done = buy_value if buy_value in ("DONE", "FAILED") else ""
+                buy_type = "CNC" if (old_buy_no or old_buy_status) else ""
+                buy_status = old_buy_status or ""
+            elif buy_value in ("CNC", "MIS") and buy_status_value == "BUY":
+                buy_trigger, buy_type, buy_done, buy_status = "BUY", buy_value, "", ""
+            else:
+                buy_trigger, buy_type, buy_done, buy_status = "", "", "", old_buy_status or ""
+
+            sell_value = str(old_sell or "").strip().upper()
+            sell_status_value = str(old_sell_status or "").strip().upper()
+            if sell_value in ("SELL", "DONE", "FAILED"):
+                sell_trigger = "SELL" if sell_value == "SELL" else ""
+                sell_done = sell_value if sell_value in ("DONE", "FAILED") else ""
+                sell_type = "CNC" if (old_sell_no or old_sell_status) else ""
+                sell_status = old_sell_status or ""
+            elif sell_value in ("CNC", "MIS") and sell_status_value == "SELL":
+                sell_trigger, sell_type, sell_done, sell_status = "SELL", sell_value, "", ""
+            else:
+                sell_trigger, sell_type, sell_done, sell_status = "", "", "", old_sell_status or ""
+
+            migrated_orders.append([
+                qty, buy_trigger, buy_type, buy_done, buy_status, old_buy_no,
+                sell_trigger, sell_type, sell_done, sell_status, old_sell_no
+            ])
+
+        # Shift the old 15-column history block Y:AM to its new location AC:AQ.
+        if old_history:
+            ws.range("AC2:AQ200").value = old_history
+        # Write the transformed order block last because it now occupies Y:AB too.
+        if migrated_orders:
+            ws.range("R2:AB200").value = migrated_orders
+        print("✅ Migrated existing order/history columns to the new layout.")
+    except Exception as exc:
+        print(f"⚠️ Workbook layout migration skipped: {exc}")
+
+
+# ============================================
 # SETUP HEADERS - DYNAMIC
 # ============================================
 
 def setup_excel_headers():
+    try:
+        ws = excel_name.sheets['symbols']
+        migrate_legacy_layout(ws)
     try:
         ws = excel_name.sheets['symbols']
         ws.range("1:1").clear_contents()
