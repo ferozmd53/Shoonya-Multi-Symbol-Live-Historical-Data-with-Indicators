@@ -1,15 +1,10 @@
 # run.py
-# Run this file from the project folder.
-# get_auth.py captures the Shoonya OAuth code and stores it in LOGIN!B7.
-# Extreme_Reversal_Signal.py then exchanges that code for the API session.
+# Start the trading engine first. It reuses a valid saved Shoonya token.
+# The browser OAuth flow is called only when no valid saved session exists.
 
 from get_auth import get_auth_code
 from Extreme_Reversal_Signal import main
 
 
 if __name__ == "__main__":
-    auth_code = get_auth_code()
-    if not auth_code:
-        raise SystemExit("❌ OAuth authorization code was not received. Login cancelled.")
-
-    main()
+    main(auth_code_provider=get_auth_code)
