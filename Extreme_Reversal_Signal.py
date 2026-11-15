@@ -317,7 +317,8 @@ def get_live_headers():
         'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
         'NADARYA BUY', 'NADARYA SELL', 'SMA Stoch',
         'BB Upper', 'BB Middle', 'BB Lower',
-        'BUY', 'SELL', 'Signal', 'Last Update'
+        '', '', '',  # N:P (old BUY/SELL/Signal) removed - kept blank so R:AB order panel stays put
+        'Last Update'
     ]
 
 def get_hist_headers():
@@ -325,8 +326,7 @@ def get_hist_headers():
     return [
         'Date', 'Open', 'High', 'Low', 'Close', 'Volume',
         'NADARYA BUY', 'NADARYA SELL', 'SMA Stoch',
-        'BB Upper', 'BB Middle', 'BB Lower',
-        'BUY', 'SELL', 'Signal'
+        'BB Upper', 'BB Middle', 'BB Lower'
     ]
 
 def get_order_headers():
@@ -1515,8 +1515,7 @@ def update_excel_bulk():
                         data.get('nwe_buy', ''), data.get('nwe_sell', ''),
                         data.get('sma_stoch', ''), data.get('bb_upper', ''),
                         data.get('bb_middle', ''), data.get('bb_lower', ''),
-                        data.get('buy', ''), data.get('sell', ''),
-                        data.get('signal', ''),
+                        '', '', '',
                         data['timestamp'].strftime('%H:%M:%S') if data.get('timestamp') else ''
                     ])
                 else:
@@ -1530,9 +1529,7 @@ def update_excel_bulk():
                     yesterday.get('close', ''), yesterday.get('volume', ''),
                     yesterday.get('nwe_buy', ''), yesterday.get('nwe_sell', ''),
                     yesterday.get('sma_stoch', ''), yesterday.get('bb_upper', ''),
-                    yesterday.get('bb_middle', ''), yesterday.get('bb_lower', ''),
-                    yesterday.get('buy', ''), yesterday.get('sell', ''),
-                    yesterday.get('signal', '')
+                    yesterday.get('bb_middle', ''), yesterday.get('bb_lower', '')
                 ])
 
         if symbols_data:
@@ -1652,6 +1649,9 @@ def setup_excel_headers():
         ws.range("U2:U200").clear_contents()
         ws.range("Z2:Z200").clear_contents()
         ws.range("1:1").clear_contents()
+        # Removed historical BUY/SELL/Signal columns (AO:AQ): clear the stale values.
+        _stale = get_column_range(get_column_letter(get_column_number(HIST_END) + 1), 3)
+        ws.range(f"{_stale[0]}2:{_stale[-1]}200").clear_contents()
         
         # Build headers in correct order: Symbol, LIVE, ORDERS, HISTORICAL
         headers = ['Symbol']
