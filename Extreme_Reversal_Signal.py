@@ -317,6 +317,7 @@ def get_live_headers():
         'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
         'NADARYA BUY', 'NADARYA SELL', 'SMA Stoch',
         'BB Upper', 'BB Middle', 'BB Lower',
+        'upperpink', 'mirrorUpperBand',
         'Last Update'
     ]
 
@@ -325,7 +326,8 @@ def get_hist_headers():
     return [
         'Date', 'Open', 'High', 'Low', 'Close', 'Volume',
         'NADARYA BUY', 'NADARYA SELL', 'SMA Stoch',
-        'BB Upper', 'BB Middle', 'BB Lower'
+        'BB Upper', 'BB Middle', 'BB Lower',
+        'upperpink', 'mirrorUpperBand'
     ]
 
 def get_order_headers():
@@ -337,6 +339,7 @@ def get_order_headers():
     ]
 
 import nadaraya_watson
+import pink_mirror
 
 # ============================================
 # CONFIGURATION - FULLY CUSTOMIZABLE
@@ -363,6 +366,13 @@ class Config:
     # few, so fetch more calendar days (end-point mode needs ~1000 bars before it
     # has bands).
     NWE_LOAD_DAYS = 1100 if nadaraya_watson.REPAINT else 1700
+    # upperpink (step line) + mirrorUpperBand - see pink_mirror.py
+    # The step line is seeded at bar 200 of the FIRST bar loaded, so the first bar
+    # must be FIXED (otherwise the seed drifts every day). Set this to the date of
+    # the first bar your TradingView chart loaded to line the step up with it.
+    PM_FIRST_BAR_DATE = '2023-01-02'
+    PM_LOAD_DAYS = ((datetime.now().date() - datetime.strptime(PM_FIRST_BAR_DATE, '%Y-%m-%d').date()).days + 30
+                    if PM_FIRST_BAR_DATE else 1100)
     
     # ==========================================
     # COLUMN CONFIGURATION - CHANGE ANY START COLUMN
@@ -531,7 +541,7 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
 def fetch_historical_data(symbol):
     try:
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=max(Config.LOAD_DAYS, Config.NWE_LOAD_DAYS))
+        start_date = end_date - timedelta(days=max(Config.LOAD_DAYS, Config.NWE_LOAD_DAYS, Config.PM_LOAD_DAYS))
         
         start_epoch = int(start_date.timestamp())
         end_epoch = int(end_date.timestamp())
@@ -597,6 +607,17 @@ def fetch_historical_data(symbol):
             df[Config.NWE_SRC].values, df['close'].values,
             Config.NWE_H, Config.NWE_MULT, Config.NWE_REPAINT)
 
+        # upperpink (step) + mirrorUpperBand on the latest completed daily bar
+        pm_df = df
+        if Config.PM_FIRST_BAR_DATE:
+            pm_df = df[df['datetime'] >= pd.Timestamp(Config.PM_FIRST_BAR_DATE)].reset_index(drop=True)
+        pm_step = pink_mirror.step_last(
+            pm_df['high'].values, pm_df['low'].values, pm_df['close'].values,
+            pm_df[pink_mirror.STEP_SRC].values,
+            last_bar_confirmed=df['datetime'].iloc[-1].date() != datetime.now().date())
+        pm_mirror = pink_mirror.mirror_last(
+            df[pink_mirror.SMA_COL].values, df[pink_mirror.REF_COL].iloc[-1])
+
         yesterday = df.iloc[-1]
         day_before = df.iloc[-2] if len(df) >= 2 else yesterday
         
@@ -619,6 +640,8 @@ def fetch_historical_data(symbol):
             'sma_stoch': round(yesterday['SMA_STOCH'], 2),
             'nwe_buy': nwe_buy,
             'nwe_sell': nwe_sell,
+            'pink': round(pm_step, 2) if pm_step == pm_step else '',
+            'mirror': round(pm_mirror, 2) if pm_mirror == pm_mirror else '',
             'buy': buy_signal,
             'sell': sell_signal,
             'signal': signal_text,
@@ -641,6 +664,25 @@ def fetch_historical_data(symbol):
     except Exception as e:
         print(f"Error fetching data: {e}")
         return None
+
+def live_mirror(hist, d, ltp):
+    """mirrorUpperBand on today's forming daily bar (today's open / low so far)."""
+    today_open = safe_float(d.get('open', 0)) or ltp
+    day_low = safe_float(d.get('day_low', 0))             # exchange day low from the tick, if sent
+    low_now = safe_float(d.get('low', 0)) or ltp
+    if day_low > 0:
+        low_now = min(low_now, day_low)
+    cur = {'open': today_open, 'high': safe_float(d.get('high', 0)) or ltp, 'low': low_now, 'close': ltp}
+    key = {'open': 'all_opens', 'high': 'all_highs', 'low': 'all_lows', 'close': 'all_closes'}
+    src_name, ref_name = pink_mirror.SMA_COL, pink_mirror.REF_COL
+    series = list(hist[key[src_name]])
+    if hist.get('last_date') == datetime.now().date():     # history already holds today's bar
+        series[-1] = cur[src_name]
+    else:
+        series.append(cur[src_name])
+    val = pink_mirror.mirror_last(series, cur[ref_name])
+    return round(val, 2) if val == val else ''
+
 
 def live_nwe_signal(hist, d, ltp):
     """Live NADARYA BUY / SELL for today's forming daily bar.
@@ -1360,6 +1402,9 @@ def on_ticks(tick):
             d['volume'] = volume
             d['timestamp'] = datetime.now()
             d['close'] = ltp
+            _tick_low = safe_float(tick.get('l', 0))
+            if _tick_low > 0:
+                d['day_low'] = _tick_low
             
             hist = historical_data_cache.get(symbol)
             
@@ -1435,6 +1480,13 @@ def on_ticks(tick):
 
                 try:
                     d['nwe_buy'], d['nwe_sell'] = live_nwe_signal(hist, d, ltp)
+                except Exception:
+                    pass
+
+                try:
+                    # step line only moves on confirmed bars (Pine) -> constant during the day
+                    d['pink'] = hist['yesterday'].get('pink', '')
+                    d['mirror'] = live_mirror(hist, d, ltp)
                 except Exception:
                     pass
                 
@@ -1521,6 +1573,7 @@ def update_excel_bulk():
                         data.get('nwe_buy', ''), data.get('nwe_sell', ''),
                         data.get('sma_stoch', ''), data.get('bb_upper', ''),
                         data.get('bb_middle', ''), data.get('bb_lower', ''),
+                        data.get('pink', ''), data.get('mirror', ''),
                         data['timestamp'].strftime('%H:%M:%S') if data.get('timestamp') else ''
                     ])
                 else:
@@ -1534,7 +1587,8 @@ def update_excel_bulk():
                     yesterday.get('close', ''), yesterday.get('volume', ''),
                     yesterday.get('nwe_buy', ''), yesterday.get('nwe_sell', ''),
                     yesterday.get('sma_stoch', ''), yesterday.get('bb_upper', ''),
-                    yesterday.get('bb_middle', ''), yesterday.get('bb_lower', '')
+                    yesterday.get('bb_middle', ''), yesterday.get('bb_lower', ''),
+                    yesterday.get('pink', ''), yesterday.get('mirror', '')
                 ])
 
         if symbols_data:
@@ -1655,19 +1709,27 @@ def migrate_spacer_columns():
         ws = excel_name.sheets['symbols']
         q1 = str(ws.range("Q1").value or "").strip().upper()
         r1 = str(ws.range("R1").value or "").strip().upper()
-        if not (q1 == "LAST UPDATE" and r1 == "QUANTITY"):
-            return True
-        print("🔧 Removing old live columns N:P from the 'symbols' sheet (everything shifts left)...")
-        ws.range("N:P").api.Delete()
+        if q1 == "LAST UPDATE" and r1 == "QUANTITY":
+            print("🔧 Removing old live columns N:P from the 'symbols' sheet (everything shifts left)...")
+            ws.range("N:P").api.Delete()
+            print("✅ Columns N:P removed; layout is now contiguous.")
+        # Previous layout (live B:N, 'Last Update' in N, orders from O): make room for the
+        # two new live columns upperpink / mirrorUpperBand by inserting N:O (orders move right).
+        n1 = str(ws.range("N1").value or "").strip().upper()
+        o1 = str(ws.range("O1").value or "").strip().upper()
+        if n1 == "LAST UPDATE" and o1 == "QUANTITY":
+            print("🔧 Inserting 2 live columns (N:O) for upperpink / mirrorUpperBand...")
+            ws.range("N:O").api.Insert()
+            print("✅ Columns inserted; orders and history moved right together.")
         try:
             excel_name.save()
         except Exception:
             pass
-        print("✅ Columns N:P removed; layout is now contiguous.")
         return True
     except Exception as exc:
-        print(f"❌ Could not remove columns N:P automatically: {exc}")
-        print("   Delete columns N:P on the 'symbols' sheet yourself (right-click > Delete), then run again.")
+        print(f"❌ Could not adjust the sheet columns automatically: {exc}")
+        print("   Old layout: delete columns N:P; layout with 'Last Update' in N: insert 2 columns at N,")
+        print("   on the 'symbols' sheet yourself, then run again.")
         return False
 
 
@@ -1789,7 +1851,7 @@ def check_new_symbols():
                             'ltp': 0, 'volume': 0,
                             'open': 0, 'high': 0, 'low': 0, 'close': 0,
                             'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
-                            'nwe_buy': '', 'nwe_sell': '',
+                            'nwe_buy': '', 'nwe_sell': '', 'pink': '', 'mirror': '',
                                         'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
                             'buy': '', 'sell': '', 'signal': '',
                             'prev_close': 0,
@@ -1805,6 +1867,8 @@ def check_new_symbols():
                             live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
                             live_data[tk]['nwe_buy'] = hist_data['yesterday']['nwe_buy']
                             live_data[tk]['nwe_sell'] = hist_data['yesterday']['nwe_sell']
+                            live_data[tk]['pink'] = hist_data['yesterday'].get('pink', '')
+                            live_data[tk]['mirror'] = hist_data['yesterday'].get('mirror', '')
                             live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
                             live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
                             live_data[tk]['bb_upper'] = hist_data['yesterday']['bb_upper']
@@ -1934,7 +1998,7 @@ def main(auth_code_provider=None):
                 'ltp': 0, 'volume': 0,
                 'open': 0, 'high': 0, 'low': 0, 'close': 0,
                 'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
-                'nwe_buy': '', 'nwe_sell': '',
+                'nwe_buy': '', 'nwe_sell': '', 'pink': '', 'mirror': '',
                 'indicator_dirty': False,
                 'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
                 'buy': '', 'sell': '', 'signal': '',
@@ -1950,6 +2014,8 @@ def main(auth_code_provider=None):
                 live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
                 live_data[tk]['nwe_buy'] = hist_data['yesterday']['nwe_buy']
                 live_data[tk]['nwe_sell'] = hist_data['yesterday']['nwe_sell']
+                live_data[tk]['pink'] = hist_data['yesterday'].get('pink', '')
+                live_data[tk]['mirror'] = hist_data['yesterday'].get('mirror', '')
                 live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
                 live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
                 live_data[tk]['bb_upper'] = hist_data['yesterday']['bb_upper']
