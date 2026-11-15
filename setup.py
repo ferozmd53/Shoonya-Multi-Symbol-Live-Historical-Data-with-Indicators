@@ -7,7 +7,7 @@ setup(
     description="Shoonya TICK REAL TIME - StochRSI + Bollinger Bands",
     license="MIT",
     packages=find_packages(),
-    py_modules=['Extreme_Reversal_Signal', 'get_auth', 'instrument_master'],
+    py_modules=['Extreme_Reversal_Signal', 'get_auth', 'instrument_master', 'nadaraya_watson'],
     install_requires=[
         "NorenRestApiPy>=0.0.22",
         "xlwings>=0.30.0",

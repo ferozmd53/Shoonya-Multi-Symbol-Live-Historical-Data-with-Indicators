@@ -315,7 +315,7 @@ def get_live_headers():
     """Get live column headers"""
     return [
         'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
-        'RSI', 'StochRSI', 'SMA Stoch',
+        'NADARYA BUY', 'NADARYA SELL', 'SMA Stoch',
         'BB Upper', 'BB Middle', 'BB Lower',
         'BUY', 'SELL', 'Signal', 'Last Update'
     ]
@@ -324,7 +324,7 @@ def get_hist_headers():
     """Get historical column headers"""
     return [
         'Date', 'Open', 'High', 'Low', 'Close', 'Volume',
-        'RSI', 'StochRSI', 'SMA Stoch',
+        'NADARYA BUY', 'NADARYA SELL', 'SMA Stoch',
         'BB Upper', 'BB Middle', 'BB Lower',
         'BUY', 'SELL', 'Signal'
     ]
@@ -336,6 +336,8 @@ def get_order_headers():
         'BUY', 'ORDER TYPE (CNC/MIS)', 'BUY PRC', 'BUY Broker Status', 'BUY Order No',
         'SELL', '', 'SELL PRC', 'SELL Broker Status', 'SELL Order No'
     ]
+
+import nadaraya_watson
 
 # ============================================
 # CONFIGURATION - FULLY CUSTOMIZABLE
@@ -353,6 +355,15 @@ class Config:
     HIST_EXCEL_UPDATE_INTERVAL = 5.0
     LOAD_DAYS = 500
     KEEP_DAYS = 500
+    # Nadaraya-Watson Envelope [LuxAlgo] (daily, source = open) - see nadaraya_watson.py
+    NWE_H = nadaraya_watson.H                 # 3.0  Bandwidth
+    NWE_MULT = nadaraya_watson.MULT           # 0.9  mult
+    NWE_SRC = nadaraya_watson.SRC             # 'open'
+    NWE_REPAINT = nadaraya_watson.REPAINT     # True Repainting Smoothing
+    # TradingView looks back 500 bars: ~340 trading bars (500 calendar days) is too
+    # few, so fetch more calendar days (end-point mode needs ~1000 bars before it
+    # has bands).
+    NWE_LOAD_DAYS = 1100 if nadaraya_watson.REPAINT else 1700
     
     # ==========================================
     # COLUMN CONFIGURATION - CHANGE ANY START COLUMN
@@ -514,7 +525,7 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
 def fetch_historical_data(symbol):
     try:
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=Config.LOAD_DAYS)
+        start_date = end_date - timedelta(days=max(Config.LOAD_DAYS, Config.NWE_LOAD_DAYS))
         
         start_epoch = int(start_date.timestamp())
         end_epoch = int(end_date.timestamp())
@@ -576,6 +587,10 @@ def fetch_historical_data(symbol):
             (df['SMA_STOCH'].shift(1) > Config.STOCH_UPPER)
         )
         
+        nwe_buy, nwe_sell = nadaraya_watson.nwe_last_bar_signal(
+            df[Config.NWE_SRC].values, df['close'].values,
+            Config.NWE_H, Config.NWE_MULT, Config.NWE_REPAINT)
+
         yesterday = df.iloc[-1]
         day_before = df.iloc[-2] if len(df) >= 2 else yesterday
         
@@ -596,6 +611,8 @@ def fetch_historical_data(symbol):
             'rsi': round(yesterday['RSI'], 2),
             'stoch_rsi': round(yesterday['STOCH_RSI'], 2),
             'sma_stoch': round(yesterday['SMA_STOCH'], 2),
+            'nwe_buy': nwe_buy,
+            'nwe_sell': nwe_sell,
             'buy': buy_signal,
             'sell': sell_signal,
             'signal': signal_text,
@@ -610,12 +627,40 @@ def fetch_historical_data(symbol):
             'all_closes': df['close'].tolist(),
             'all_highs': df['high'].tolist(),
             'all_lows': df['low'].tolist(),
+            'all_opens': df['open'].tolist(),
+            'last_date': yesterday['datetime'].date(),
             'yesterday': yesterday_data
         }
         
     except Exception as e:
         print(f"Error fetching data: {e}")
         return None
+
+def live_nwe_signal(hist, d, ltp):
+    """Live NADARYA BUY / SELL for today's forming daily bar.
+
+    Source is the OPEN, which is fixed once the day opens, so in repaint mode the
+    result is computed once per (symbol, open) and cached - not on every tick.
+    """
+    today_open = safe_float(d.get('open', 0))
+    if today_open <= 0:
+        today_open = ltp
+    key = (id(hist), round(today_open, 4), round(ltp, 4) if not Config.NWE_REPAINT else None)
+    if d.get('_nwe_key') == key and '_nwe_val' in d:
+        return d['_nwe_val']
+
+    opens = list(hist['all_opens'])
+    closes = list(hist['all_closes'])
+    if hist.get('last_date') == datetime.now().date():     # history already holds today's bar
+        opens[-1], closes[-1] = today_open, ltp
+    else:
+        opens.append(today_open)
+        closes.append(ltp)
+    series = opens if Config.NWE_SRC == 'open' else closes
+    val = nadaraya_watson.nwe_last_bar_signal(
+        series, closes, Config.NWE_H, Config.NWE_MULT, Config.NWE_REPAINT)
+    d['_nwe_key'], d['_nwe_val'] = key, val
+    return val
 
 # ============================================
 # SAFE CONVERSION
@@ -1381,6 +1426,11 @@ def on_ticks(tick):
                 d['buy'] = 1 if buy_signal else ''
                 d['sell'] = 1 if sell_signal else ''
                 d['signal'] = signal
+
+                try:
+                    d['nwe_buy'], d['nwe_sell'] = live_nwe_signal(hist, d, ltp)
+                except Exception:
+                    pass
                 
     except Exception as e:
         pass
@@ -1462,7 +1512,7 @@ def update_excel_bulk():
                         data.get('low', 0) if data.get('low', 0) > 0 else '',
                         data.get('close', 0) if data.get('close', 0) > 0 else '',
                         data.get('volume', 0) if data.get('volume', 0) > 0 else '',
-                        data.get('rsi', ''), data.get('stoch_rsi', ''),
+                        data.get('nwe_buy', ''), data.get('nwe_sell', ''),
                         data.get('sma_stoch', ''), data.get('bb_upper', ''),
                         data.get('bb_middle', ''), data.get('bb_lower', ''),
                         data.get('buy', ''), data.get('sell', ''),
@@ -1478,7 +1528,7 @@ def update_excel_bulk():
                     yesterday.get('date', ''), yesterday.get('open', ''),
                     yesterday.get('high', ''), yesterday.get('low', ''),
                     yesterday.get('close', ''), yesterday.get('volume', ''),
-                    yesterday.get('rsi', ''), yesterday.get('stoch_rsi', ''),
+                    yesterday.get('nwe_buy', ''), yesterday.get('nwe_sell', ''),
                     yesterday.get('sma_stoch', ''), yesterday.get('bb_upper', ''),
                     yesterday.get('bb_middle', ''), yesterday.get('bb_lower', ''),
                     yesterday.get('buy', ''), yesterday.get('sell', ''),
@@ -1708,6 +1758,7 @@ def check_new_symbols():
                             'ltp': 0, 'volume': 0,
                             'open': 0, 'high': 0, 'low': 0, 'close': 0,
                             'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
+                            'nwe_buy': '', 'nwe_sell': '',
                                         'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
                             'buy': '', 'sell': '', 'signal': '',
                             'prev_close': 0,
@@ -1721,6 +1772,8 @@ def check_new_symbols():
                         if hist_data:
                             historical_data_cache[symbol] = hist_data
                             live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
+                            live_data[tk]['nwe_buy'] = hist_data['yesterday']['nwe_buy']
+                            live_data[tk]['nwe_sell'] = hist_data['yesterday']['nwe_sell']
                             live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
                             live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
                             live_data[tk]['bb_upper'] = hist_data['yesterday']['bb_upper']
@@ -1848,6 +1901,7 @@ def main(auth_code_provider=None):
                 'ltp': 0, 'volume': 0,
                 'open': 0, 'high': 0, 'low': 0, 'close': 0,
                 'rsi': 50, 'stoch_rsi': 50, 'sma_stoch': 50,
+                'nwe_buy': '', 'nwe_sell': '',
                 'indicator_dirty': False,
                 'bb_upper': 0, 'bb_middle': 0, 'bb_lower': 0,
                 'buy': '', 'sell': '', 'signal': '',
@@ -1861,6 +1915,8 @@ def main(auth_code_provider=None):
             if hist_data:
                 historical_data_cache[symbol] = hist_data
                 live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
+                live_data[tk]['nwe_buy'] = hist_data['yesterday']['nwe_buy']
+                live_data[tk]['nwe_sell'] = hist_data['yesterday']['nwe_sell']
                 live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
                 live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
                 live_data[tk]['bb_upper'] = hist_data['yesterday']['bb_upper']
