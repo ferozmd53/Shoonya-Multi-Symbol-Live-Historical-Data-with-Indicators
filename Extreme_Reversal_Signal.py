@@ -317,7 +317,6 @@ def get_live_headers():
         'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
         'NADARYA BUY', 'NADARYA SELL', 'SMA Stoch',
         'BB Upper', 'BB Middle', 'BB Lower',
-        '', '', '',  # N:P (old BUY/SELL/Signal) removed - kept blank so R:AB order panel stays put
         'Last Update'
     ]
 
@@ -372,8 +371,10 @@ class Config:
     SYMBOL_COL = 'A'           # Symbols column
     
     LIVE_START = 'B'           # Live data starts here
-    HIST_START = 'AC'          # Historical data starts after order columns R:AB
-    ORDER_START = 'R'          # Order data starts here
+    # Columns are CONTIGUOUS (no gaps): Symbol A | LIVE B.. | ORDERS | HISTORICAL.
+    # Orders start right after the live block; history right after the orders.
+    ORDER_START = get_column_letter(get_column_number(LIVE_START) + len(get_live_headers()))
+    HIST_START = get_column_letter(get_column_number(ORDER_START) + len(get_order_headers()))
 
 # ============================================
 # AUTO-CALCULATE COLUMN POSITIONS
@@ -392,6 +393,11 @@ ORDER_COLS = get_column_range(Config.ORDER_START, ORDER_COUNT)
 LIVE_END = LIVE_COLS[-1] if LIVE_COLS else Config.LIVE_START
 HIST_END = HIST_COLS[-1] if HIST_COLS else Config.HIST_START
 ORDER_END = ORDER_COLS[-1] if ORDER_COLS else Config.ORDER_START
+
+# Order-panel ranges derived from the order columns (never hard-code letters)
+ORDER_ALL = f"{ORDER_COLS[0]}2:{ORDER_COLS[10]}200"          # Quantity .. SELL Order No
+ORDER_BUY_BLOCK = f"{ORDER_COLS[3]}2:{ORDER_COLS[5]}200"     # BUY PRC, status, order no
+ORDER_SELL_BLOCK = f"{ORDER_COLS[8]}2:{ORDER_COLS[10]}200"   # SELL PRC, status, order no
 
 # Get ALL columns in order: A, LIVE, ORDERS, HISTORICAL
 ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + ORDER_COLS + HIST_COLS
@@ -1004,7 +1010,7 @@ def process_order_updates():
 
     try:
         ws = excel_name.sheets['symbols']
-        panel = ws.range("R2:AB200").value or []
+        panel = ws.range(ORDER_ALL).value or []
         buy_block = []
         sell_block = []
         for row in panel:
@@ -1061,9 +1067,9 @@ def process_order_updates():
             block[row_idx][status_idx] = new_status
 
         if buy_changed:
-            ws.range("U2:W200").value = buy_block
+            ws.range(ORDER_BUY_BLOCK).value = buy_block
         if sell_changed:
-            ws.range("Z2:AB200").value = sell_block
+            ws.range(ORDER_SELL_BLOCK).value = sell_block
     except Exception as exc:
         print(f"Order update batch write error: {exc}")
 
@@ -1100,7 +1106,7 @@ def process_order_results():
         return
 
     try:
-        panel = ws.range("R2:AB200").value or []
+        panel = ws.range(ORDER_ALL).value or []
         buy_block = []
         sell_block = []
         for row in panel:
@@ -1160,9 +1166,9 @@ def process_order_results():
                     order_inflight.discard(key)
 
         if buy_changed:
-            ws.range("U2:W200").value = buy_block
+            ws.range(ORDER_BUY_BLOCK).value = buy_block
         if sell_changed:
-            ws.range("Z2:AB200").value = sell_block
+            ws.range(ORDER_SELL_BLOCK).value = sell_block
     except Exception as exc:
         print(f"Excel broker-result write error: {exc}")
 
@@ -1175,7 +1181,7 @@ def reconcile_order_statuses():
             orders = order_reconcile_future.result()
             if isinstance(orders, list):
                 ws = excel_name.sheets['symbols']
-                panel = ws.range("R2:AB200").value or []
+                panel = ws.range(ORDER_ALL).value or []
                 buy_block = []
                 sell_block = []
                 order_rows = {}
@@ -1228,9 +1234,9 @@ def reconcile_order_statuses():
                             sell_changed = True
 
                 if buy_changed:
-                    ws.range("U2:W200").value = buy_block
+                    ws.range(ORDER_BUY_BLOCK).value = buy_block
                 if sell_changed:
-                    ws.range("Z2:AB200").value = sell_block
+                    ws.range(ORDER_SELL_BLOCK).value = sell_block
         except Exception as exc:
             print(f"Broker order-book read/apply error: {exc}")
         finally:
@@ -1250,7 +1256,7 @@ def check_order_signals():
     try:
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
-        panel = ws.range("R2:AB200").value or []
+        panel = ws.range(ORDER_ALL).value or []
         login_sheet = excel_name.sheets['LOGIN']
         algo_id_value = login_sheet.range('B2').value
         algo_id = str(algo_id_value).strip() if algo_id_value else ''
@@ -1515,7 +1521,6 @@ def update_excel_bulk():
                         data.get('nwe_buy', ''), data.get('nwe_sell', ''),
                         data.get('sma_stoch', ''), data.get('bb_upper', ''),
                         data.get('bb_middle', ''), data.get('bb_lower', ''),
-                        '', '', '',
                         data['timestamp'].strftime('%H:%M:%S') if data.get('timestamp') else ''
                     ])
                 else:
@@ -1605,10 +1610,10 @@ def migrate_legacy_layout(ws):
 
         # Shift the old 15-column history block Y:AM to its new location AC:AQ.
         if old_history:
-            ws.range("AC2:AQ200").value = old_history
+            ws.range(f"{Config.HIST_START}2:{HIST_END}200").value = [list(r)[:HIST_COUNT] for r in old_history]
         # Write the transformed order block last because it now occupies Y:AB too.
         if migrated_orders:
-            ws.range("R2:AB200").value = migrated_orders
+            ws.range(ORDER_ALL).value = migrated_orders
         print("✅ Migrated existing order/history columns to the new layout.")
     except Exception as exc:
         print(f"⚠️ Workbook layout migration skipped: {exc}")
@@ -1617,8 +1622,9 @@ def migrate_legacy_layout(ws):
 def consolidate_shared_order_type(ws):
     """Use T as the single CNC/MIS selector for both BUY and SELL; retain column Y."""
     try:
-        buy_types = ws.range("T2:T200").value or []
-        sell_types = ws.range("Y2:Y200").value or []
+        t_col, y_col = ORDER_COLS[2], ORDER_COLS[7]   # shared type column + legacy SELL type column
+        buy_types = ws.range(f"{t_col}2:{t_col}200").value or []
+        sell_types = ws.range(f"{y_col}2:{y_col}200").value or []
         merged = []
         changed_t = False
         for idx in range(199):
@@ -1629,9 +1635,9 @@ def consolidate_shared_order_type(ws):
                 changed_t = True
             merged.append([buy_value])
         if changed_t:
-            ws.range("T2:T200").value = merged
+            ws.range(f"{t_col}2:{t_col}200").value = merged
         if any(value not in (None, "") for value in sell_types):
-            ws.range("Y2:Y200").clear_contents()
+            ws.range(f"{y_col}2:{y_col}200").clear_contents()
     except Exception as exc:
         print(f"⚠️ Shared order-type migration skipped: {exc}")
 
@@ -1640,14 +1646,39 @@ def consolidate_shared_order_type(ws):
 # SETUP HEADERS - DYNAMIC
 # ============================================
 
+def migrate_spacer_columns():
+    """Existing workbook still has the old live BUY/SELL/Signal columns N:P?
+    (old layout: Q1 = 'Last Update', R1 = 'Quantity').  Delete N:P in Excel so the
+    order panel, history and the user's order inputs shift left together.
+    Returns False if it could not be done (the run is then stopped, never misaligned)."""
+    try:
+        ws = excel_name.sheets['symbols']
+        q1 = str(ws.range("Q1").value or "").strip().upper()
+        r1 = str(ws.range("R1").value or "").strip().upper()
+        if not (q1 == "LAST UPDATE" and r1 == "QUANTITY"):
+            return True
+        print("🔧 Removing old live columns N:P from the 'symbols' sheet (everything shifts left)...")
+        ws.range("N:P").api.Delete()
+        try:
+            excel_name.save()
+        except Exception:
+            pass
+        print("✅ Columns N:P removed; layout is now contiguous.")
+        return True
+    except Exception as exc:
+        print(f"❌ Could not remove columns N:P automatically: {exc}")
+        print("   Delete columns N:P on the 'symbols' sheet yourself (right-click > Delete), then run again.")
+        return False
+
+
 def setup_excel_headers():
     try:
         ws = excel_name.sheets['symbols']
         migrate_legacy_layout(ws)
         consolidate_shared_order_type(ws)
         # U and Z were local DONE flags in the previous version; they are obsolete.
-        ws.range("U2:U200").clear_contents()
-        ws.range("Z2:Z200").clear_contents()
+        ws.range(f"{ORDER_COLS[3]}2:{ORDER_COLS[3]}200").clear_contents()
+        ws.range(f"{ORDER_COLS[8]}2:{ORDER_COLS[8]}200").clear_contents()
         ws.range("1:1").clear_contents()
         # Removed historical BUY/SELL/Signal columns (AO:AQ): clear the stale values.
         _stale = get_column_range(get_column_letter(get_column_number(HIST_END) + 1), 3)
@@ -1684,11 +1715,11 @@ def setup_excel_headers():
         for col in ALL_COLS:
             ws.range(f'{col}:{col}').column_width = 12
         ws.range('A:A').column_width = 20
-        for col in ('V', 'AA'):
+        for col in (ORDER_COLS[4], ORDER_COLS[9]):
             ws.range(f'{col}:{col}').column_width = 34
-        for col in ('W', 'AB'):
+        for col in (ORDER_COLS[5], ORDER_COLS[10]):
             ws.range(f'{col}:{col}').column_width = 20
-        for col in ('T', 'Y', 'U', 'Z'):
+        for col in (ORDER_COLS[2], ORDER_COLS[7], ORDER_COLS[3], ORDER_COLS[8]):
             ws.range(f'{col}:{col}').column_width = 12
 
         return True
@@ -1806,7 +1837,7 @@ def start_excel_loop():
     print(f"   📊 LIVE DATA (Columns {Config.LIVE_START}-{LIVE_END}) - {LIVE_COUNT} columns")
     print(f"   📋 ORDERS (Columns {Config.ORDER_START}-{ORDER_END}) - {ORDER_COUNT} columns")
     print(f"   📜 HISTORICAL DATA (Columns {Config.HIST_START}-{HIST_END}) - {HIST_COUNT} columns")
-    print(f"   ⚡ Auto signals in live columns BUY/SELL/Signal\n")
+    print(f"   ⚡ NADARYA BUY / NADARYA SELL in live + historical columns\n")
     
     last_save = time.time()
     last_status = time.time()
@@ -1860,6 +1891,8 @@ def main(auth_code_provider=None):
     print("="*80)
     
     print("\n[1/5] Setting up Excel...")
+    if not migrate_spacer_columns():
+        return
     setup_excel_headers()
     
     print("\n[2/5] Logging to Shoonya...")
