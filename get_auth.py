@@ -27,6 +27,7 @@ import xlwings as xw
 
 
 INPUT_FILL_DELAY_SEC = 3.0
+FIELD_WAIT_SEC       = 40     # how long to wait for a login field to appear before giving up
 LAUNCH_TIMEOUT_SEC   = 20
 AUTH_CACHE_TTL_SEC   = 120.0
 WORKBOOK_NAME        = "PythonTrader_Terminal_LMT.xlsm"
@@ -243,6 +244,50 @@ _FILL_JS = """
 """
 
 
+def _fill_field(cdp, which, val, label, timeout=None, poll=0.5):
+    """Fill one login field, WAITING for it to appear.
+
+    The login page can be slow to render its inputs; trying only once made the run fail
+    at random with "User ID fill failed: {'ok': False, 'which': 'user'}".  This retries
+    until the field is visible, reloads the page once if it is still missing half-way,
+    and on failure reports what the page really contained.
+    """
+    timeout = FIELD_WAIT_SEC if timeout is None else timeout
+    started = time.time()
+    deadline = started + timeout
+    reloaded = False
+    last = None
+    while True:
+        try:
+            last = cdp.evaluate(_FILL_JS.replace(
+                "__ARGS__", json.dumps({"which": which, "value": val})))
+        except Exception as ex:                       # page navigating / context gone
+            last = {"ok": False, "which": which, "error": str(ex)}
+        if last and last.get("ok") and str(last.get("got", "")).strip() == val.strip():
+            return last
+        now = time.time()
+        if now >= deadline:
+            break
+        if not reloaded and now - started >= timeout / 2:
+            reloaded = True
+            print("(field not found yet - reloading the login page once)", end=" ", flush=True)
+            try:
+                cdp.call("Page.reload")
+            except Exception:
+                pass
+            time.sleep(3)
+            continue
+        time.sleep(poll)
+    try:
+        page = cdp.evaluate(
+            "JSON.stringify({url: location.href, title: document.title, "
+            "ready: document.readyState, inputs: [...document.querySelectorAll('input')]"
+            ".map(e => ({id: e.id, name: e.name, type: e.type}))})")
+    except Exception as ex:
+        page = f"(could not read page: {ex})"
+    raise RuntimeError(f"{label} fill failed after {timeout:.0f}s: {last} | page: {page}")
+
+
 def get_auth_code():
     with _auth_lock:
         if _auth_cache["code"]:
@@ -348,7 +393,15 @@ def get_auth_code():
                 page["webSocketDebuggerUrl"], timeout=15, suppress_origin=True))
             cdp.call("Page.enable")
             cdp.call("Runtime.enable")
-            time.sleep(3)
+            # wait until the page has finished loading (then a short settle for its scripts)
+            for _ in range(60):
+                try:
+                    if cdp.evaluate("document.readyState") == "complete":
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            time.sleep(2)
 
             totp = pyotp.TOTP(totp_sec).now()
             print(f"\nComputed TOTP: {totp}")
@@ -359,10 +412,7 @@ def get_auth_code():
                 ("totp",     totp, "TOTP"),
             ]:
                 print(f"  Filling {label}…", end=" ", flush=True)
-                r = cdp.evaluate(_FILL_JS.replace(
-                    "__ARGS__", json.dumps({"which": which, "value": val})))
-                if not r or not r.get("ok") or r.get("got", "").strip() != val.strip():
-                    raise RuntimeError(f"{label} fill failed: {r}")
+                r = _fill_field(cdp, which, val, label)
                 shown = "*" * len(val) if which == "password" else val
                 print(f"✅ {shown}  ({r.get('matchedBy')}, id={r.get('id')!r})")
                 if INPUT_FILL_DELAY_SEC > 0:
