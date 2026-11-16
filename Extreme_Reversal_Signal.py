@@ -315,8 +315,8 @@ def get_live_headers():
     """Get live column headers"""
     return [
         'LTP', 'Open', 'High', 'Low', 'Close', 'Volume',
-        'NADARYA BUY', 'NADARYA SELL', 'SMA Stoch',
-        'BB Upper', 'BB Middle', 'BB Lower',
+        'NADARYA BUY', 'NADARYA SELL',
+        'BB Upper', 'BB Lower',
         'upperpink', 'mirrorUpperBand',
         'Last Update'
     ]
@@ -325,8 +325,8 @@ def get_hist_headers():
     """Get historical column headers"""
     return [
         'Date', 'Open', 'High', 'Low', 'Close', 'Volume',
-        'NADARYA BUY', 'NADARYA SELL', 'SMA Stoch',
-        'BB Upper', 'BB Middle', 'BB Lower',
+        'NADARYA BUY', 'NADARYA SELL',
+        'BB Upper', 'BB Lower',
         'upperpink', 'mirrorUpperBand'
     ]
 
@@ -1571,8 +1571,7 @@ def update_excel_bulk():
                         data.get('close', 0) if data.get('close', 0) > 0 else '',
                         data.get('volume', 0) if data.get('volume', 0) > 0 else '',
                         data.get('nwe_buy', ''), data.get('nwe_sell', ''),
-                        data.get('sma_stoch', ''), data.get('bb_upper', ''),
-                        data.get('bb_middle', ''), data.get('bb_lower', ''),
+                        data.get('bb_upper', ''), data.get('bb_lower', ''),
                         data.get('pink', ''), data.get('mirror', ''),
                         data['timestamp'].strftime('%H:%M:%S') if data.get('timestamp') else ''
                     ])
@@ -1586,8 +1585,7 @@ def update_excel_bulk():
                     yesterday.get('high', ''), yesterday.get('low', ''),
                     yesterday.get('close', ''), yesterday.get('volume', ''),
                     yesterday.get('nwe_buy', ''), yesterday.get('nwe_sell', ''),
-                    yesterday.get('sma_stoch', ''), yesterday.get('bb_upper', ''),
-                    yesterday.get('bb_middle', ''), yesterday.get('bb_lower', ''),
+                    yesterday.get('bb_upper', ''), yesterday.get('bb_lower', ''),
                     yesterday.get('pink', ''), yesterday.get('mirror', '')
                 ])
 
@@ -1721,6 +1719,18 @@ def migrate_spacer_columns():
             print("🔧 Inserting 2 live columns (N:O) for upperpink / mirrorUpperBand...")
             ws.range("N:O").api.Insert()
             print("✅ Columns inserted; orders and history moved right together.")
+        # 'SMA Stoch' and 'BB Middle' were removed from the live AND historical blocks:
+        # delete those columns (found by their row-1 header) right-to-left so everything shifts left.
+        row1 = ws.range("A1:BZ1").value or []
+        drop = [i + 1 for i, h in enumerate(row1)
+                if str(h or "").strip().upper() in ("SMA STOCH", "BB MIDDLE")]
+        if drop:
+            names = [get_column_letter(c) for c in sorted(drop)]
+            print(f"🔧 Removing SMA Stoch / BB Middle columns ({', '.join(names)}) - everything shifts left...")
+            for col_num in sorted(drop, reverse=True):
+                letter = get_column_letter(col_num)
+                ws.range(f"{letter}:{letter}").api.Delete()
+            print("✅ Columns removed; layout is contiguous.")
         try:
             excel_name.save()
         except Exception:
@@ -1728,8 +1738,8 @@ def migrate_spacer_columns():
         return True
     except Exception as exc:
         print(f"❌ Could not adjust the sheet columns automatically: {exc}")
-        print("   Old layout: delete columns N:P; layout with 'Last Update' in N: insert 2 columns at N,")
-        print("   on the 'symbols' sheet yourself, then run again.")
+        print("   Fix the 'symbols' sheet by hand (delete the SMA Stoch and BB Middle columns, in the live and")
+        print("   historical blocks, and make the live block B:N), then run again.")
         return False
 
 
