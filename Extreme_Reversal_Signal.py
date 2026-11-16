@@ -1784,15 +1784,23 @@ def setup_excel_headers():
             cell.font.bold = True
         
         # Set column widths
-        for col in ALL_COLS:
-            ws.range(f'{col}:{col}').column_width = 12
-        ws.range('A:A').column_width = 20
-        for col in (ORDER_COLS[4], ORDER_COLS[9]):
-            ws.range(f'{col}:{col}').column_width = 34
-        for col in (ORDER_COLS[5], ORDER_COLS[10]):
-            ws.range(f'{col}:{col}').column_width = 20
-        for col in (ORDER_COLS[2], ORDER_COLS[7], ORDER_COLS[3], ORDER_COLS[8]):
-            ws.range(f'{col}:{col}').column_width = 12
+        # Column widths: give a column its default width ONLY while it is still at Excel's
+        # default width.  Widths you set yourself are never overwritten on the next start.
+        try:
+            default_width = float(ws.api.StandardWidth)
+        except Exception:
+            default_width = 8.43
+        widths = {col: 12 for col in ALL_COLS}
+        widths['A'] = 20
+        widths.update({ORDER_COLS[4]: 34, ORDER_COLS[9]: 34, ORDER_COLS[5]: 20, ORDER_COLS[10]: 20})
+        for col, width in widths.items():
+            try:
+                rng = ws.range(f'{col}:{col}')
+                current = rng.column_width
+                if current is None or abs(float(current) - default_width) < 0.06:
+                    rng.column_width = width
+            except Exception:
+                pass
 
         return True
     except Exception:
@@ -1992,6 +2000,7 @@ def main(auth_code_provider=None):
     print(f"📋 Processing {len(symbols)} symbols...")
     
     print(f"\n[5/5] Loading tokens and historical data...")
+    _t_hist = time.time()
     for i, symbol in enumerate(symbols, 1):
         exchange, trading_symbol = parse_symbol_input(symbol)
         token = GetToken(exchange, trading_symbol)
@@ -2044,6 +2053,9 @@ def main(auth_code_provider=None):
         time.sleep(0.03)
     
     print(f"\n✅ Initialized {len(symbol_tokens)} symbols")
+    _elapsed = time.time() - _t_hist
+    print(f"⏱ History + indicators loaded in {_elapsed:.1f}s "
+          f"({_elapsed / max(len(symbols), 1):.2f}s per symbol). Nothing is written to Excel until this finishes.")
     
     if len(symbol_tokens) == 0:
         print("❌ No symbols!")
