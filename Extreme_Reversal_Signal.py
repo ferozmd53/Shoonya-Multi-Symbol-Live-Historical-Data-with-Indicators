@@ -340,6 +340,7 @@ def get_order_headers():
 
 import nadaraya_watson
 import pink_mirror
+import candle_cache
 
 # ============================================
 # CONFIGURATION - FULLY CUSTOMIZABLE
@@ -371,6 +372,12 @@ class Config:
     # must be FIXED (otherwise the seed drifts every day). Set this to the date of
     # the first bar your TradingView chart loaded to line the step up with it.
     PM_FIRST_BAR_DATE = '2023-01-02'
+    # SQLite cache of the DAILY candles (candle_cache.py): the full history is downloaded once,
+    # later runs only fetch the last few days (or nothing when the cache is already up to date).
+    USE_CANDLE_CACHE = True
+    CANDLE_DB_PATH = str(WORKBOOK_PATH.parent / "daily_candles.db")   # beside the workbook
+    CANDLE_OVERLAP_DAYS = 10          # already-cached days re-fetched to detect splits/bonus
+    CANDLE_FULL_REFRESH_DAYS = 30     # full re-download this often
     PM_LOAD_DAYS = ((datetime.now().date() - datetime.strptime(PM_FIRST_BAR_DATE, '%Y-%m-%d').date()).days + 30
                     if PM_FIRST_BAR_DATE else 1100)
     
@@ -538,30 +545,44 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
 # FETCH HISTORICAL DATA
 # ============================================
 
+def _download_daily_rows(symbol, from_date, to_dt):
+    """Raw daily rows from Shoonya between from_date and to_dt (list of dicts)."""
+    start_epoch = int(datetime.combine(from_date, datetime.min.time()).timestamp())
+    end_epoch = int(to_dt.timestamp())
+    ret = api.get_daily_price_series(
+        exchange="NSE", tradingsymbol=symbol,
+        startdate=str(start_epoch), enddate=str(end_epoch)
+    )
+    rows = []
+    for item in ret or []:
+        if isinstance(item, str):
+            try:
+                rows.append(json.loads(item))
+            except Exception:
+                continue
+    return rows
+
+
 def fetch_historical_data(symbol):
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=max(Config.LOAD_DAYS, Config.NWE_LOAD_DAYS, Config.PM_LOAD_DAYS))
-        
-        start_epoch = int(start_date.timestamp())
-        end_epoch = int(end_date.timestamp())
-        
-        ret = api.get_daily_price_series(
-            exchange="NSE", tradingsymbol=symbol,
-            startdate=str(start_epoch), enddate=str(end_epoch)
-        )
-        
-        if not ret:
-            return None
-        
-        parsed_data = []
-        for item in ret:
-            if isinstance(item, str):
-                try:
-                    parsed_data.append(json.loads(item))
-                except:
-                    continue
-        
+
+        parsed_data, source = None, "Shoonya"
+        if Config.USE_CANDLE_CACHE:
+            try:
+                parsed_data, source = candle_cache.get_daily(
+                    Config.CANDLE_DB_PATH,
+                    lambda frm, to: _download_daily_rows(symbol, frm, to),
+                    "NSE", symbol, start_date.date(),
+                    overlap_days=Config.CANDLE_OVERLAP_DAYS,
+                    full_refresh_days=Config.CANDLE_FULL_REFRESH_DAYS)
+            except Exception as exc:
+                print(f"⚠️ Candle cache unavailable ({exc}); loading {symbol} from Shoonya directly")
+                parsed_data, source = None, "Shoonya (cache error)"
+        if parsed_data is None and source in ("Shoonya", "Shoonya (cache error)"):
+            parsed_data = _download_daily_rows(symbol, start_date.date(), end_date)
+
         if not parsed_data:
             return None
         
@@ -651,7 +672,19 @@ def fetch_historical_data(symbol):
             'prev_sma_stoch': day_before['SMA_STOCH']
         }
         
+        try:
+            # keep a record of the daily indicator values (one row per symbol / completed day)
+            if Config.USE_CANDLE_CACHE and yesterday['datetime'].date() < datetime.now().date():
+                candle_cache.save_indicators(Config.CANDLE_DB_PATH, "NSE", symbol,
+                                             yesterday['datetime'].date(), {
+                    'upperpink': pm_step, 'mirror_upper_band': pm_mirror,
+                    'nadarya_buy': nwe_buy, 'nadarya_sell': nwe_sell,
+                    'bb_upper': yesterday['BB_UPPER'], 'bb_lower': yesterday['BB_LOWER']})
+        except Exception:
+            pass
+
         return {
+            'source': source,
             'df': df,
             'all_closes': df['close'].tolist(),
             'all_highs': df['high'].tolist(),
@@ -2044,7 +2077,7 @@ def main(auth_code_provider=None):
                 live_data[tk]['prev_bb_upper'] = hist_data['yesterday']['prev_bb_upper']
                 live_data[tk]['prev_bb_lower'] = hist_data['yesterday']['prev_bb_lower']
                 live_data[tk]['prev_sma_stoch'] = hist_data['yesterday']['prev_sma_stoch']
-                print(f"   [{i:2}/{len(symbols)}] ✓ {symbol}")
+                print(f"   [{i:2}/{len(symbols)}] ✓ {symbol}  [{hist_data.get('source', '')}]")
             else:
                 status = "live token loaded; historical indicators are NSE-only" if exchange != "NSE" else "historical data unavailable"
                 print(f"   [{i:2}/{len(symbols)}] ✓ {symbol} ({status})")

@@ -7,3 +7,5 @@ build/
 .vscode/
 .idea/
 *.xlsx
+daily_candles.db
+*.db-journal
