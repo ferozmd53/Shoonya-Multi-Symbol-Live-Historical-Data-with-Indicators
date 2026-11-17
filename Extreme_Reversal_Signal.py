@@ -341,6 +341,8 @@ def get_order_headers():
 import nadaraya_watson
 import pink_mirror
 import candle_cache
+import indicator_settings
+import indicator_history
 
 # ============================================
 # CONFIGURATION - FULLY CUSTOMIZABLE
@@ -356,7 +358,7 @@ class Config:
     EXCEL_UPDATE_INTERVAL = 0.1          # All live B:Q fields refreshed together
     INDICATOR_EXCEL_UPDATE_INTERVAL = 0.1  # Kept for compatibility; live fields share one write
     HIST_EXCEL_UPDATE_INTERVAL = 5.0
-    LOAD_DAYS = 500
+    LOAD_DAYS = 1500
     KEEP_DAYS = 500
     # Nadaraya-Watson Envelope [LuxAlgo] (daily, source = open) - see nadaraya_watson.py
     NWE_H = nadaraya_watson.H                 # 3.0  Bandwidth
@@ -378,8 +380,20 @@ class Config:
     CANDLE_DB_PATH = str(WORKBOOK_PATH.parent / "daily_candles.db")   # beside the workbook
     CANDLE_OVERLAP_DAYS = 10          # already-cached days re-fetched to detect splits/bonus
     CANDLE_FULL_REFRESH_DAYS = 30     # full re-download this often
-    PM_LOAD_DAYS = ((datetime.now().date() - datetime.strptime(PM_FIRST_BAR_DATE, '%Y-%m-%d').date()).days + 30
-                    if PM_FIRST_BAR_DATE else 1100)
+    # mirror band + step line inputs (overridden from the LOGIN sheet, column M:N)
+    PM_LEN = pink_mirror.LEN
+    PM_MULT = pink_mirror.MULT
+    PM_REF = pink_mirror.REF_COL
+    PM_SMA_COL = pink_mirror.SMA_COL
+    PM_STEP_WIDTH = pink_mirror.STEP_WIDTH
+    PM_STEP_SRC = pink_mirror.STEP_SRC
+    PM_ATR_LEN = pink_mirror.ATR_LEN
+    PM_ATR_HI = pink_mirror.ATR_HIGHEST
+    PM_START_BAR = pink_mirror.START_BAR
+    AS_OF_DATE = None                 # date -> historical block shows that past day
+    SETTINGS_POLL_SECONDS = 2.0
+    HISTORY_SHEET = 'INDICATOR_HISTORY'
+    HISTORY_MAX_DAYS = 500
     
     # ==========================================
     # COLUMN CONFIGURATION - CHANGE ANY START COLUMN
@@ -563,89 +577,132 @@ def _download_daily_rows(symbol, from_date, to_dt):
     return rows
 
 
+def history_days():
+    """Calendar days of daily candles to load (settings + what each indicator needs)."""
+    nwe = 1100 if Config.NWE_REPAINT else 1700
+    pm = 1100
+    if Config.PM_FIRST_BAR_DATE:
+        first = datetime.strptime(Config.PM_FIRST_BAR_DATE, '%Y-%m-%d').date()
+        pm = (datetime.now().date() - first).days + 30
+    return max(Config.LOAD_DAYS, nwe, pm)
+
+
+def indicator_params():
+    """Indicator settings as the dict used by indicator_history."""
+    return {
+        'bb_length': Config.BB_LENGTH, 'bb_std': Config.BB_STD,
+        'nwe_h': Config.NWE_H, 'nwe_mult': Config.NWE_MULT,
+        'nwe_src': Config.NWE_SRC, 'nwe_repaint': Config.NWE_REPAINT,
+        'pm_len': Config.PM_LEN, 'pm_mult': Config.PM_MULT,
+        'pm_ref': Config.PM_REF, 'pm_sma': Config.PM_SMA_COL,
+        'step_width': Config.PM_STEP_WIDTH, 'step_src': Config.PM_STEP_SRC,
+        'atr_len': Config.PM_ATR_LEN, 'atr_hi': Config.PM_ATR_HI,
+        'start_bar': Config.PM_START_BAR, 'first_bar_date': Config.PM_FIRST_BAR_DATE,
+    }
+
+
+def _rnd(v):
+    return round(v, 2) if v == v else ''
+
+
+def _row_from_snapshot(snap):
+    """snapshot dict -> the same key format as hist['yesterday'] (only what the sheet shows)."""
+    return {
+        'date': snap['datetime'].strftime('%d/%m/%Y'),
+        'open': snap['open'], 'high': snap['high'], 'low': snap['low'],
+        'close': snap['close'], 'volume': snap['volume'],
+        'bb_upper': _rnd(snap['bb_upper']), 'bb_lower': _rnd(snap['bb_lower']),
+        'nwe_buy': snap['nwe_buy'], 'nwe_sell': snap['nwe_sell'],
+        'pink': _rnd(snap['pink']), 'mirror': _rnd(snap['mirror']),
+    }
+
+
+def _download_df(symbol):
+    """Daily candles (DataFrame) + source text, or (None, reason)."""
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=history_days())
+    parsed_data, source = None, "Shoonya"
+    if Config.USE_CANDLE_CACHE:
+        try:
+            parsed_data, source = candle_cache.get_daily(
+                Config.CANDLE_DB_PATH,
+                lambda frm, to: _download_daily_rows(symbol, frm, to),
+                "NSE", symbol, start_date.date(),
+                overlap_days=Config.CANDLE_OVERLAP_DAYS,
+                full_refresh_days=Config.CANDLE_FULL_REFRESH_DAYS)
+        except Exception as exc:
+            print(f"⚠️ Candle cache unavailable ({exc}); loading {symbol} from Shoonya directly")
+            parsed_data, source = None, "Shoonya (cache error)"
+    if parsed_data is None and source in ("Shoonya", "Shoonya (cache error)"):
+        parsed_data = _download_daily_rows(symbol, start_date.date(), end_date)
+    if not parsed_data:
+        return None, source
+
+    df = pd.DataFrame(parsed_data)
+    df.rename(columns={
+        'time': 'datetime', 'into': 'open', 'inth': 'high',
+        'intl': 'low', 'intc': 'close', 'intv': 'volume'
+    }, inplace=True)
+    df['datetime'] = pd.to_datetime(df['datetime'], format='%d-%b-%Y')
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.sort_values('datetime').dropna().reset_index(drop=True)
+    return df, source
+
+
 def fetch_historical_data(symbol):
     try:
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=max(Config.LOAD_DAYS, Config.NWE_LOAD_DAYS, Config.PM_LOAD_DAYS))
-
-        parsed_data, source = None, "Shoonya"
-        if Config.USE_CANDLE_CACHE:
-            try:
-                parsed_data, source = candle_cache.get_daily(
-                    Config.CANDLE_DB_PATH,
-                    lambda frm, to: _download_daily_rows(symbol, frm, to),
-                    "NSE", symbol, start_date.date(),
-                    overlap_days=Config.CANDLE_OVERLAP_DAYS,
-                    full_refresh_days=Config.CANDLE_FULL_REFRESH_DAYS)
-            except Exception as exc:
-                print(f"⚠️ Candle cache unavailable ({exc}); loading {symbol} from Shoonya directly")
-                parsed_data, source = None, "Shoonya (cache error)"
-        if parsed_data is None and source in ("Shoonya", "Shoonya (cache error)"):
-            parsed_data = _download_daily_rows(symbol, start_date.date(), end_date)
-
-        if not parsed_data:
+        df, source = _download_df(symbol)
+        if df is None:
             return None
-        
-        df = pd.DataFrame(parsed_data)
-        df.rename(columns={
-            'time': 'datetime', 'into': 'open', 'inth': 'high',
-            'intl': 'low', 'intc': 'close', 'intv': 'volume'
-        }, inplace=True)
-        
-        df['datetime'] = pd.to_datetime(df['datetime'], format='%d-%b-%Y')
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        df = df.sort_values('datetime')
-        df = df.dropna().reset_index(drop=True)
-        
-        if len(df) < Config.BB_LENGTH:
+        return _build_hist(df, symbol, source)
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return None
+
+
+def _build_hist(df, symbol, source):
+    """Indicators from already-downloaded candles (no network).  Used at start-up and on a settings change."""
+    try:
+        base = df[['datetime', 'open', 'high', 'low', 'close', 'volume']].copy().reset_index(drop=True)
+        df = base.copy()
+        if len(df) < max(Config.BB_LENGTH, 3):
             return None
-        
+
         df['RSI'] = tradingview_rsi(df['close'], Config.RSI_LENGTH)
         df['STOCH_RSI'] = tradingview_stochrsi(df['RSI'], Config.STOCH_LENGTH)
         df['SMA_STOCH'] = df['STOCH_RSI'].rolling(3).mean()
-        
+
         bb_middle, bb_upper, bb_lower = tradingview_bb(df['close'], Config.BB_LENGTH, Config.BB_STD)
         df['BB_MIDDLE'] = bb_middle
         df['BB_UPPER'] = bb_upper
         df['BB_LOWER'] = bb_lower
-        
+
         df['BUY_SIGNAL'] = (
             (df['close'].shift(1) < df['BB_LOWER'].shift(1)) &
             (df['close'] > df['BB_LOWER']) &
             (df['SMA_STOCH'].shift(1) < Config.STOCH_LOWER)
         )
-        
         df['SELL_SIGNAL'] = (
             (df['close'].shift(1) > df['BB_UPPER'].shift(1)) &
             (df['close'] < df['BB_UPPER']) &
             (df['SMA_STOCH'].shift(1) > Config.STOCH_UPPER)
         )
-        
-        nwe_buy, nwe_sell = nadaraya_watson.nwe_last_bar_signal(
-            df[Config.NWE_SRC].values, df['close'].values,
-            Config.NWE_H, Config.NWE_MULT, Config.NWE_REPAINT)
 
-        # upperpink (step) + mirrorUpperBand on the latest completed daily bar
-        pm_df = df
-        if Config.PM_FIRST_BAR_DATE:
-            pm_df = df[df['datetime'] >= pd.Timestamp(Config.PM_FIRST_BAR_DATE)].reset_index(drop=True)
-        pm_step = pink_mirror.step_last(
-            pm_df['high'].values, pm_df['low'].values, pm_df['close'].values,
-            pm_df[pink_mirror.STEP_SRC].values,
-            last_bar_confirmed=df['datetime'].iloc[-1].date() != datetime.now().date())
-        pm_mirror = pink_mirror.mirror_last(
-            df[pink_mirror.SMA_COL].values, df[pink_mirror.REF_COL].iloc[-1])
+        params = indicator_params()
+        confirmed = df['datetime'].iloc[-1].date() != datetime.now().date()
+        snap = indicator_history.snapshot(base, params, confirmed)
+        nwe_buy, nwe_sell = snap['nwe_buy'], snap['nwe_sell']
+        pm_step, pm_mirror = snap['pink'], snap['mirror']
 
         yesterday = df.iloc[-1]
         day_before = df.iloc[-2] if len(df) >= 2 else yesterday
-        
+
         buy_signal = 1 if yesterday['BUY_SIGNAL'] else ''
         sell_signal = 1 if yesterday['SELL_SIGNAL'] else ''
         signal_text = 'BUY' if yesterday['BUY_SIGNAL'] else ('SELL' if yesterday['SELL_SIGNAL'] else '')
-        
+
         yesterday_data = {
             'date': yesterday['datetime'].strftime('%d/%m/%Y'),
             'open': yesterday['open'],
@@ -661,8 +718,8 @@ def fetch_historical_data(symbol):
             'sma_stoch': round(yesterday['SMA_STOCH'], 2),
             'nwe_buy': nwe_buy,
             'nwe_sell': nwe_sell,
-            'pink': round(pm_step, 2) if pm_step == pm_step else '',
-            'mirror': round(pm_mirror, 2) if pm_mirror == pm_mirror else '',
+            'pink': _rnd(pm_step),
+            'mirror': _rnd(pm_mirror),
             'buy': buy_signal,
             'sell': sell_signal,
             'signal': signal_text,
@@ -671,7 +728,17 @@ def fetch_historical_data(symbol):
             'prev_bb_lower': day_before['BB_LOWER'],
             'prev_sma_stoch': day_before['SMA_STOCH']
         }
-        
+
+        # AS_OF_DATE: what the indicators showed on that past day (point-in-time)
+        asof_row = None
+        if Config.AS_OF_DATE:
+            cut = base[base['datetime'] <= pd.Timestamp(Config.AS_OF_DATE)]
+            if len(cut) >= 3:
+                try:
+                    asof_row = _row_from_snapshot(indicator_history.snapshot(cut.reset_index(drop=True), params, True))
+                except Exception as exc:
+                    print(f"⚠️ AS_OF_DATE {Config.AS_OF_DATE} for {symbol}: {exc}")
+
         try:
             # keep a record of the daily indicator values (one row per symbol / completed day)
             if Config.USE_CANDLE_CACHE and yesterday['datetime'].date() < datetime.now().date():
@@ -685,59 +752,87 @@ def fetch_historical_data(symbol):
 
         return {
             'source': source,
+            'symbol': symbol,
+            'base': base,
             'df': df,
             'all_closes': df['close'].tolist(),
             'all_highs': df['high'].tolist(),
             'all_lows': df['low'].tolist(),
             'all_opens': df['open'].tolist(),
             'last_date': yesterday['datetime'].date(),
-            'yesterday': yesterday_data
+            'yesterday': yesterday_data,
+            'asof': asof_row,
         }
-        
+
     except Exception as e:
-        print(f"Error fetching data: {e}")
+        print(f"Error building indicators for {symbol}: {e}")
         return None
 
-def live_mirror(hist, d, ltp):
-    """mirrorUpperBand on today's forming daily bar (today's open / low so far)."""
+
+def _preload_live(d, hist_data):
+    """Copy the latest completed-day indicator values into a live_data entry (before ticks arrive)."""
+    y = hist_data['yesterday']
+    d['rsi'] = y['rsi']
+    d['nwe_buy'] = y['nwe_buy']
+    d['nwe_sell'] = y['nwe_sell']
+    d['pink'] = y.get('pink', '')
+    d['mirror'] = y.get('mirror', '')
+    d['stoch_rsi'] = y['stoch_rsi']
+    d['sma_stoch'] = y['sma_stoch']
+    d['bb_upper'] = y['bb_upper']
+    d['bb_middle'] = y['bb_middle']
+    d['bb_lower'] = y['bb_lower']
+    d['prev_close'] = y['prev_close']
+    d['prev_bb_upper'] = y['prev_bb_upper']
+    d['prev_bb_lower'] = y['prev_bb_lower']
+    d['prev_sma_stoch'] = y['prev_sma_stoch']
+    d.pop('_nwe_key', None)
+
+def _current_bar(d, ltp):
+    """Today's forming daily bar from the tick data."""
     today_open = safe_float(d.get('open', 0)) or ltp
     day_low = safe_float(d.get('day_low', 0))             # exchange day low from the tick, if sent
     low_now = safe_float(d.get('low', 0)) or ltp
     if day_low > 0:
         low_now = min(low_now, day_low)
-    cur = {'open': today_open, 'high': safe_float(d.get('high', 0)) or ltp, 'low': low_now, 'close': ltp}
-    key = {'open': 'all_opens', 'high': 'all_highs', 'low': 'all_lows', 'close': 'all_closes'}
-    src_name, ref_name = pink_mirror.SMA_COL, pink_mirror.REF_COL
-    series = list(hist[key[src_name]])
+    return {'open': today_open, 'high': safe_float(d.get('high', 0)) or ltp, 'low': low_now, 'close': ltp}
+
+
+_HIST_KEY = {'open': 'all_opens', 'high': 'all_highs', 'low': 'all_lows', 'close': 'all_closes'}
+
+
+def _series_with_today(hist, name, cur):
+    series = list(hist[_HIST_KEY[name]])
     if hist.get('last_date') == datetime.now().date():     # history already holds today's bar
-        series[-1] = cur[src_name]
+        series[-1] = cur[name]
     else:
-        series.append(cur[src_name])
-    val = pink_mirror.mirror_last(series, cur[ref_name])
+        series.append(cur[name])
+    return series
+
+
+def live_mirror(hist, d, ltp):
+    """mirrorUpperBand on today's forming daily bar (today's open / low so far)."""
+    cur = _current_bar(d, ltp)
+    series = _series_with_today(hist, Config.PM_SMA_COL, cur)
+    val = pink_mirror.mirror_last(series, cur[Config.PM_REF], Config.PM_LEN, Config.PM_MULT)
     return round(val, 2) if val == val else ''
 
 
 def live_nwe_signal(hist, d, ltp):
     """Live NADARYA BUY / SELL for today's forming daily bar.
 
-    Source is the OPEN, which is fixed once the day opens, so in repaint mode the
-    result is computed once per (symbol, open) and cached - not on every tick.
+    The result is cached per (symbol, settings, today's source value) - and per tick only
+    when the source / mode actually changes with the price.
     """
-    today_open = safe_float(d.get('open', 0))
-    if today_open <= 0:
-        today_open = ltp
-    key = (id(hist), round(today_open, 4), round(ltp, 4) if not Config.NWE_REPAINT else None)
+    cur = _current_bar(d, ltp)
+    moving = (not Config.NWE_REPAINT) or Config.NWE_SRC != 'open'
+    key = (id(hist), Config.NWE_H, Config.NWE_MULT, Config.NWE_SRC, Config.NWE_REPAINT,
+           round(cur[Config.NWE_SRC], 4), round(ltp, 4) if moving else None)
     if d.get('_nwe_key') == key and '_nwe_val' in d:
         return d['_nwe_val']
 
-    opens = list(hist['all_opens'])
-    closes = list(hist['all_closes'])
-    if hist.get('last_date') == datetime.now().date():     # history already holds today's bar
-        opens[-1], closes[-1] = today_open, ltp
-    else:
-        opens.append(today_open)
-        closes.append(ltp)
-    series = opens if Config.NWE_SRC == 'open' else closes
+    series = _series_with_today(hist, Config.NWE_SRC, cur)
+    closes = _series_with_today(hist, 'close', cur)
     val = nadaraya_watson.nwe_last_bar_signal(
         series, closes, Config.NWE_H, Config.NWE_MULT, Config.NWE_REPAINT)
     d['_nwe_key'], d['_nwe_val'] = key, val
@@ -1612,7 +1707,12 @@ def update_excel_bulk():
                     live_rows.append([''] * LIVE_COUNT)
 
             if hist_due:
-                yesterday = hist['yesterday'] if hist else {}
+                if not hist:
+                    yesterday = {}
+                elif Config.AS_OF_DATE:
+                    yesterday = hist.get('asof') or {}      # past day (blank if before the first bar)
+                else:
+                    yesterday = hist['yesterday']
                 hist_rows.append([
                     yesterday.get('date', ''), yesterday.get('open', ''),
                     yesterday.get('high', ''), yesterday.get('low', ''),
@@ -1915,20 +2015,7 @@ def check_new_symbols():
                         
                         if hist_data:
                             historical_data_cache[symbol] = hist_data
-                            live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
-                            live_data[tk]['nwe_buy'] = hist_data['yesterday']['nwe_buy']
-                            live_data[tk]['nwe_sell'] = hist_data['yesterday']['nwe_sell']
-                            live_data[tk]['pink'] = hist_data['yesterday'].get('pink', '')
-                            live_data[tk]['mirror'] = hist_data['yesterday'].get('mirror', '')
-                            live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
-                            live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
-                            live_data[tk]['bb_upper'] = hist_data['yesterday']['bb_upper']
-                            live_data[tk]['bb_middle'] = hist_data['yesterday']['bb_middle']
-                            live_data[tk]['bb_lower'] = hist_data['yesterday']['bb_lower']
-                            live_data[tk]['prev_close'] = hist_data['yesterday']['prev_close']
-                            live_data[tk]['prev_bb_upper'] = hist_data['yesterday']['prev_bb_upper']
-                            live_data[tk]['prev_bb_lower'] = hist_data['yesterday']['prev_bb_lower']
-                            live_data[tk]['prev_sma_stoch'] = hist_data['yesterday']['prev_sma_stoch']
+                            _preload_live(live_data[tk], hist_data)
                         
                         print(f"   ✓ Added {symbol}")
                 except Exception as e:
@@ -1940,6 +2027,212 @@ def check_new_symbols():
                 print(f"✓ Subscribed to {len(new_tokens)} new symbols\n")
     except Exception as e:
         pass
+
+# ============================================
+# INDICATOR SETTINGS FROM EXCEL (LOGIN!M:O) + INDICATOR_HISTORY SHEET
+# ============================================
+
+_settings_last = None          # last applied settings dict
+_last_settings_poll = 0
+_history_sig = None
+_history_rows_written = 0
+_extra_base = {}               # on-demand candles for INDICATOR_HISTORY symbols not on the symbols sheet
+HISTORY_HEADER_ROW, HISTORY_FIRST_ROW = 5, 6
+
+
+def _login_ws():
+    return excel_name.sheets['LOGIN']
+
+
+def load_settings_at_startup():
+    """Create the settings block (never overwrites values), read, validate, apply."""
+    global _settings_last
+    ws = _login_ws()
+    indicator_settings.ensure_block(ws)
+    values, warnings = indicator_settings.read_settings(ws)
+    indicator_settings.apply_to(Config, values)
+    _settings_last = values
+    for w in warnings:
+        print(f"⚠️ Setting {w}")
+    msg = f"OK {datetime.now():%H:%M:%S} loaded"
+    if warnings:
+        msg += f" | {len(warnings)} warning(s): " + "; ".join(warnings)
+    indicator_settings.write_status(ws, msg[:250])
+    print(f"⚙️  Indicator settings read from sheet LOGIN column M:N "
+          f"(AS_OF_DATE = {Config.AS_OF_DATE or 'latest'}, candles = {history_days()} days)")
+
+
+def ensure_history_sheet():
+    ws = _ensure_sheet(Config.HISTORY_SHEET)
+    if ws.range("A1").value in (None, ""):
+        ws.range("A1:A3").value = [["SYMBOL"], ["DAYS"], ["STATUS"]]
+    if ws.range("B2").value in (None, ""):
+        ws.range("B2").value = 30
+    if ws.range("B1").value in (None, ""):
+        try:
+            first = excel_name.sheets['symbols'].range(f"{Config.SYMBOL_COL}2").value
+            if first:
+                ws.range("B1").value = str(first).strip()
+        except Exception:
+            pass
+    ws.range("C1").value = "type a symbol (e.g. NSE:RELIANCE-EQ) and how many days; the table below updates by itself"
+    return ws
+
+
+def _set_history_status(ws, text):
+    try:
+        ws.range("B3").value = text
+    except Exception:
+        pass
+
+
+def _history_base(symbol_key, trading_symbol):
+    hist = historical_data_cache.get(symbol_key)
+    if hist is not None and hist.get('base') is not None:
+        return hist['base'], hist
+    cached = _extra_base.get(symbol_key)
+    if cached is not None and cached[1] == datetime.now().date():
+        return cached[0], cached[0]
+    df, _src = _download_df(trading_symbol)
+    if df is None:
+        return None, None
+    base = df[['datetime', 'open', 'high', 'low', 'close', 'volume']].reset_index(drop=True)
+    _extra_base[symbol_key] = (base, datetime.now().date())
+    return base, base
+
+
+def refresh_indicator_history(force=False):
+    """Fill INDICATOR_HISTORY with the last N days of indicator values for the typed symbol."""
+    global _history_sig, _history_rows_written
+    try:
+        ws = excel_name.sheets[Config.HISTORY_SHEET]
+    except Exception:
+        ws = ensure_history_sheet()
+    top = ws.range("B1:B2").value
+    raw_symbol, raw_days = top[0], top[1]
+    if raw_symbol in (None, ""):
+        sig = ("blank",)
+        if sig != _history_sig:
+            _set_history_status(ws, "type a symbol in B1 (e.g. NSE:RELIANCE-EQ)")
+            _history_sig = sig
+        return
+    try:
+        days = int(float(raw_days)) if raw_days not in (None, "") else 30
+    except (TypeError, ValueError):
+        days = 30
+    days = max(1, min(days, Config.HISTORY_MAX_DAYS))
+
+    try:
+        key = normalized_symbol_key(str(raw_symbol).strip().upper())
+        exchange, trading_symbol = parse_symbol_input(key)
+    except Exception as exc:
+        sig = ("bad", str(raw_symbol))
+        if sig != _history_sig:
+            _set_history_status(ws, f"bad symbol: {exc}")
+            _history_sig = sig
+        return
+    if exchange != "NSE":
+        sig = ("nse", key)
+        if sig != _history_sig:
+            _set_history_status(ws, "only NSE symbols have daily indicator history")
+            _history_sig = sig
+        return
+
+    hist = historical_data_cache.get(key)
+    params = indicator_params()
+    sig = (key, days, tuple(sorted(params.items(), key=lambda kv: kv[0])), id(hist) if hist else None,
+           datetime.now().date())
+    if sig == _history_sig and not force:
+        return
+    _history_sig = sig
+    _set_history_status(ws, f"computing {days} days for {key} ...")
+    base, _ = _history_base(key, trading_symbol)
+    if base is None or len(base) < 3:
+        _set_history_status(ws, f"no candle data for {key}")
+        return
+    confirmed = base['datetime'].iloc[-1].date() != datetime.now().date()
+    tbl = indicator_history.table(base, days, params, confirmed)
+    values = []
+    for row in tbl.itertuples(index=False):
+        values.append([('' if (isinstance(v, float) and v != v) else (round(v, 2) if isinstance(v, float) else v))
+                       for v in row])
+    cols = len(indicator_history.TABLE_COLUMNS)
+    last_col = get_column_letter(cols)
+    ws.range(f"A{HISTORY_HEADER_ROW}:{last_col}{HISTORY_HEADER_ROW}").value = indicator_history.TABLE_COLUMNS
+    if _history_rows_written > len(values):
+        ws.range(f"A{HISTORY_FIRST_ROW + len(values)}:{last_col}{HISTORY_FIRST_ROW + _history_rows_written}").clear_contents()
+    if values:
+        ws.range(f"A{HISTORY_FIRST_ROW}:{last_col}{HISTORY_FIRST_ROW + len(values) - 1}").value = values
+    _history_rows_written = len(values)
+    _set_history_status(ws, f"OK {datetime.now():%H:%M:%S} | {key} | {len(values)} days (newest first)")
+
+
+def reload_indicators(refetch):
+    """Recompute indicators for every loaded symbol (refetch=True re-reads candles via the SQLite cache)."""
+    global _history_sig
+    _extra_base.clear()
+    for symbol, tk in list(symbol_tokens.items()):
+        try:
+            exchange, trading_symbol = parse_symbol_input(symbol)
+        except Exception:
+            continue
+        if exchange != "NSE":
+            continue
+        old = historical_data_cache.get(symbol)
+        if refetch or old is None or old.get('base') is None:
+            new = fetch_historical_data(trading_symbol)
+        else:
+            new = _build_hist(old['base'], trading_symbol, old.get('source', ''))
+        if new:
+            historical_data_cache[symbol] = new
+            d = live_data.get(tk)
+            if d is not None:
+                _preload_live(d, new)
+    _history_sig = None
+
+
+def check_settings():
+    """Poll LOGIN!M:N; when something changed apply it right away (no restart)."""
+    global _settings_last
+    ws = _login_ws()
+    values, warnings = indicator_settings.read_settings(ws)
+    if values == _settings_last:
+        return
+    changed = sorted(k for k in values if _settings_last is None or values[k] != _settings_last.get(k))
+    indicator_settings.apply_to(Config, values)
+    _settings_last = values
+    refetch = any(k in indicator_settings.DATA_KEYS for k in changed)
+    print(f"⚙️  Settings changed: {', '.join(changed)} -> {'reloading candles + ' if refetch else ''}recalculating")
+    for w in warnings:
+        print(f"⚠️ Setting {w}")
+    t0 = time.time()
+    try:
+        reload_indicators(refetch)
+        msg = f"OK {datetime.now():%H:%M:%S} applied {', '.join(changed)} ({time.time() - t0:.1f}s)"
+    except Exception as exc:
+        msg = f"ERROR {datetime.now():%H:%M:%S} {exc}"
+        print(f"❌ Applying settings failed: {exc}")
+    if warnings:
+        msg += " | " + "; ".join(warnings)
+    indicator_settings.write_status(ws, msg[:250])
+
+
+def poll_settings_and_history():
+    """Called from the main loop; does real work at most every SETTINGS_POLL_SECONDS."""
+    global _last_settings_poll
+    now = time.time()
+    if now - _last_settings_poll < Config.SETTINGS_POLL_SECONDS:
+        return
+    _last_settings_poll = now
+    try:
+        check_settings()
+    except Exception as exc:
+        print(f"Settings check error: {exc}")
+    try:
+        refresh_indicator_history()
+    except Exception as exc:
+        print(f"INDICATOR_HISTORY error: {exc}")
+
 
 # ============================================
 # MAIN EXCEL LOOP
@@ -1968,6 +2261,7 @@ def start_excel_loop():
             # Priority 1: publish the latest WebSocket prices and indicators first.
             # Order REST calls already run in worker threads; their Excel results follow.
             update_excel_bulk()
+            poll_settings_and_history()
 
             process_order_updates()
             process_order_results()
@@ -2009,6 +2303,11 @@ def main(auth_code_provider=None):
     if not migrate_spacer_columns():
         return
     setup_excel_headers()
+    try:
+        load_settings_at_startup()
+        ensure_history_sheet()
+    except Exception as exc:
+        print(f"⚠️ Indicator settings sheet problem ({exc}); using built-in defaults")
     
     print("\n[2/5] Logging to Shoonya...")
     if not Shoonya_login(auth_code_provider=auth_code_provider):
@@ -2063,20 +2362,7 @@ def main(auth_code_provider=None):
             
             if hist_data:
                 historical_data_cache[symbol] = hist_data
-                live_data[tk]['rsi'] = hist_data['yesterday']['rsi']
-                live_data[tk]['nwe_buy'] = hist_data['yesterday']['nwe_buy']
-                live_data[tk]['nwe_sell'] = hist_data['yesterday']['nwe_sell']
-                live_data[tk]['pink'] = hist_data['yesterday'].get('pink', '')
-                live_data[tk]['mirror'] = hist_data['yesterday'].get('mirror', '')
-                live_data[tk]['stoch_rsi'] = hist_data['yesterday']['stoch_rsi']
-                live_data[tk]['sma_stoch'] = hist_data['yesterday']['sma_stoch']
-                live_data[tk]['bb_upper'] = hist_data['yesterday']['bb_upper']
-                live_data[tk]['bb_middle'] = hist_data['yesterday']['bb_middle']
-                live_data[tk]['bb_lower'] = hist_data['yesterday']['bb_lower']
-                live_data[tk]['prev_close'] = hist_data['yesterday']['prev_close']
-                live_data[tk]['prev_bb_upper'] = hist_data['yesterday']['prev_bb_upper']
-                live_data[tk]['prev_bb_lower'] = hist_data['yesterday']['prev_bb_lower']
-                live_data[tk]['prev_sma_stoch'] = hist_data['yesterday']['prev_sma_stoch']
+                _preload_live(live_data[tk], hist_data)
                 print(f"   [{i:2}/{len(symbols)}] ✓ {symbol}  [{hist_data.get('source', '')}]")
             else:
                 status = "live token loaded; historical indicators are NSE-only" if exchange != "NSE" else "historical data unavailable"
