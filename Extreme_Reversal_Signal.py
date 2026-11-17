@@ -390,7 +390,7 @@ class Config:
     PM_ATR_LEN = pink_mirror.ATR_LEN
     PM_ATR_HI = pink_mirror.ATR_HIGHEST
     PM_START_BAR = pink_mirror.START_BAR
-    ORDER_PRICE_TYPE = 'MKT'          # MKT = market order, LMT = limit at LTP +/- 5 (LOGIN sheet: ORDER_TYPE)
+    ORDER_BUFFER_PCT = 0.5            # Shoonya refuses API MKT orders -> marketable LIMIT at LTP +/- this % (LOGIN: ORDER_BUFFER_PCT)
     AS_OF_DATE = None                 # date -> historical block shows that past day
     SETTINGS_POLL_SECONDS = 2.0
     HISTORY_SHEET = 'INDICATOR_HISTORY'
@@ -489,17 +489,15 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
         print(f"📊 Placing {buy_sell} order: {qty} shares of {symbol}")
         buy_or_sell = 'B' if buy_sell.upper() == 'BUY' else 'S'
 
-        use_market = str(Config.ORDER_PRICE_TYPE).upper() == 'MKT' and price <= 0
-        if use_market:
-            price = 0
-        elif price <= 0:
+        if price <= 0:
             if tk and tk in live_data:
                 current_price = live_data[tk].get('ltp', 0)
                 if current_price > 0:
-                    if buy_sell.upper() == 'BUY':
-                        price = current_price + 5
-                    else:
-                        price = current_price - 5
+                    # marketable limit: crosses the spread so it fills like a market order
+                    # (price protection stays in place); rounded to a 0.05 tick
+                    move = current_price * Config.ORDER_BUFFER_PCT / 100.0
+                    raw_price = current_price + move if buy_sell.upper() == 'BUY' else current_price - move
+                    price = max(round(round(raw_price / 0.05) * 0.05, 2), 0.05)
                 else:
                     price = 100
             else:
@@ -517,8 +515,8 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
             'tradingsymbol': tradingsymbol,
             'quantity': int(qty),
             'discloseqty': 0,
-            'price_type': 'MKT' if use_market else 'LMT',
-            'price': '0' if use_market else str(round(float(price), 2)),
+            'price_type': 'LMT',
+            'price': str(round(float(price), 2)),
             'trigger_price': None,
             'retention': 'DAY',
             'amo': None,
@@ -547,7 +545,7 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
             # Keep the submitted limit price until the asynchronous broker update
             # supplies its authoritative PRC field.
             result = dict(result)
-            result['_submitted_prc'] = 'MKT' if use_market else str(round(float(price), 2))
+            result['_submitted_prc'] = str(round(float(price), 2))
             print(f"📋 Broker order number received; awaiting final status. Order No: {order_info['order_no']}")
             return result
 
