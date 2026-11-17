@@ -39,6 +39,8 @@ SPEC = [
     ("STEP_START_BAR", 200, ("int", 0, 5000), "step line: seed bar (Pine bar_index == 200)", "PM_START_BAR"),
     ("BB_LENGTH", 20, ("int", 2, 500), "Bollinger Bands length", "BB_LENGTH"),
     ("BB_STD", 2.0, ("float", 0.1, 20), "Bollinger Bands standard deviations", "BB_STD"),
+    ("ORDER_TYPE", "mkt", ("choice", ["mkt", "lmt"]),
+     "orders from the sheet: MKT = market order, LMT = limit at LTP +/- 5", "ORDER_PRICE_TYPE"),
     ("AS_OF_DATE", "", "date_opt",
      "blank = latest. A past date (e.g. 2026-11-10): the HISTORICAL block shows that day's candle + indicators",
      "AS_OF_DATE"),
