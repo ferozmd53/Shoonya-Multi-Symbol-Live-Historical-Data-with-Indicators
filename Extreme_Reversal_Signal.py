@@ -390,6 +390,7 @@ class Config:
     PM_ATR_LEN = pink_mirror.ATR_LEN
     PM_ATR_HI = pink_mirror.ATR_HIGHEST
     PM_START_BAR = pink_mirror.START_BAR
+    ORDER_BUFFER_RS = 0.0             # fixed rupees added (BUY) / subtracted (SELL) from LTP; 0 = use the % below
     ORDER_BUFFER_PCT = 0.5            # Shoonya refuses API MKT orders -> marketable LIMIT at LTP +/- this % (LOGIN: ORDER_BUFFER_PCT)
     AS_OF_DATE = None                 # date -> historical block shows that past day
     SETTINGS_POLL_SECONDS = 2.0
@@ -495,7 +496,8 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
                 if current_price > 0:
                     # marketable limit: crosses the spread so it fills like a market order
                     # (price protection stays in place); rounded to a 0.05 tick
-                    move = current_price * Config.ORDER_BUFFER_PCT / 100.0
+                    move = (Config.ORDER_BUFFER_RS if Config.ORDER_BUFFER_RS > 0
+                            else current_price * Config.ORDER_BUFFER_PCT / 100.0)
                     raw_price = current_price + move if buy_sell.upper() == 'BUY' else current_price - move
                     price = max(round(round(raw_price / 0.05) * 0.05, 2), 0.05)
                 else:
