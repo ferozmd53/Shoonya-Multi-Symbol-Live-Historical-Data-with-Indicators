@@ -39,13 +39,13 @@ RECEIVER_HOST = "127.0.0.1"
 RECEIVER_PORT = 8765
 
 # Maximum wait for a fresh jKey request after refreshing Shoonya.
-JKEY_TIMEOUT = 5
+JKEY_TIMEOUT = 10
 
 # Chrome may take up to 30 seconds to poll Python, then up to 45 seconds
 # to finish reloading the Shoonya tab.
-RELOAD_TIMEOUT = 0.5
+RELOAD_TIMEOUT = 3
 
-LOGIN_WAIT = 0.2
+LOGIN_WAIT = 2
 
 DETECTION_ATTEMPTS = 2
 DETECTION_INTERVAL = 1
@@ -56,6 +56,13 @@ captured_jkey = None
 # Safe metadata only; never store or print credentials or the jKey.
 jkey_diagnostics = []
 candidate_request_count = 0
+extension_heartbeat_event = threading.Event()
+extension_heartbeat_info = {}
+
+# Excel workbook is opened first and kept as the single live source of truth.
+excel_book = None
+login_field_rectangles = []
+last_expected_mouse = None
 
 tab_snapshot_event = threading.Event()
 tab_snapshot = None
@@ -73,6 +80,10 @@ user32 = ctypes.WinDLL("user32", use_last_error=True)
 SW_RESTORE = 9  # Restore a minimized Chrome window.
 SW_MAXIMIZE = 3  # Maximize Chrome so screenshots and click coordinates stay consistent.
 
+# PyAutoGUI emergency corner stop remains enabled.
+pyautogui.FAILSAFE = True
+pyautogui.PAUSE = 0.20
+
 
 # ============================================================
 # CHROME EXTENSION FILES
@@ -81,7 +92,7 @@ SW_MAXIMIZE = 3  # Maximize Chrome so screenshots and click coordinates stay con
 MANIFEST = r"""{
   "manifest_version": 3,
   "name": "Shoonya JKEY Capture + Tab Scanner",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Captures Shoonya API jKey in the extension and delivers it to the local Excel receiver.",
   "permissions": ["tabs", "alarms", "webRequest"],
   "host_permissions": ["https://*/*", "http://127.0.0.1:8765/*"],
@@ -114,13 +125,15 @@ async function postLocal(path, payload) {
 }
 
 function isShoonyaNorenRequest(urlText) {
+    // Observe every HTTPS request to Shoonya-owned hosts, not only URLs whose
+    // path contains NorenWClientWeb. Some Shoonya builds route web-session
+    // calls through a different path. jKey is still accepted only when it is
+    // explicitly present in that request's body or URL.
     try {
         const url = new URL(urlText);
         const host = url.hostname.toLowerCase();
-        const isShoonyaHost =
-            host === SHOONYA_DOMAIN || host.endsWith('.' + SHOONYA_DOMAIN);
-        return isShoonyaHost &&
-            url.pathname.toLowerCase().includes('norenwclientweb');
+        return url.protocol === 'https:' &&
+            (host === SHOONYA_DOMAIN || host.endsWith('.' + SHOONYA_DOMAIN));
     } catch (_) {
         return false;
     }
@@ -337,11 +350,22 @@ function waitForTabComplete(tabId, timeoutMs) {
     });
 }
 
+async function sendHeartbeat() {
+    try {
+        await postLocal('/heartbeat', {
+            extension: 'Shoonya JKEY Capture',
+            version: chrome.runtime.getManifest().version,
+            time: new Date().toISOString()
+        });
+    } catch (_) {}
+}
+
 async function checkForPythonScan() {
     if (scanBusy) return;
     scanBusy = true;
 
     try {
+        await sendHeartbeat();
         const response = await fetch(LOCAL + '/scan', {cache: 'no-store'});
         if (!response.ok) return;
 
@@ -891,6 +915,80 @@ def get_chrome_uia_window(hwnd=None):
     ).wrapper_object()
 
 
+def auto_reload_shoonya_extension():
+
+    """Try to reload only the Shoonya unpacked extension through Chrome UIA.
+
+    This applies the freshly written service-worker code without asking for a
+    manual confirmation. If Chrome does not expose the matching Reload button,
+    the function leaves all extensions untouched and the main retry loop stays
+    alive.
+    """
+
+    extension_title = "Shoonya JKEY Capture + Tab Scanner"
+    print("\nAutomatically applying the updated Shoonya Chrome extension...")
+
+    try:
+        if not activate_chrome():
+            _wait_until_resumed("Waiting for Chrome to reload the Shoonya extension")
+
+        # Open Extensions in a separate tab; do not replace the Shoonya tab.
+        pyautogui.hotkey("ctrl", "t")
+        time.sleep(0.3)
+        paste_url_into_chrome("chrome://extensions/")
+        time.sleep(3.0)
+
+        win = get_chrome_uia_window()
+        buttons = win.descendants(control_type="Button")
+        for button in buttons:
+            try:
+                button_name = str(
+                    getattr(button.element_info, "name", "") or button.window_text() or ""
+                ).strip().lower()
+                if button_name != "reload":
+                    continue
+
+                ancestor = button
+                ancestor_text = []
+                for _ in range(8):
+                    if ancestor is None:
+                        break
+                    try:
+                        ancestor_text.append(str(ancestor.window_text() or ""))
+                        ancestor_text.append(str(getattr(ancestor.element_info, "name", "") or ""))
+                        ancestor = ancestor.parent()
+                    except Exception:
+                        break
+
+                combined = " ".join(ancestor_text).lower()
+                if "shoonya jkey capture" not in combined:
+                    continue
+
+                button.click_input()
+                time.sleep(2.5)
+                print("Shoonya extension Reload button clicked automatically.")
+                try:
+                    scan_chrome_tabs()
+                except Exception as scan_error:
+                    print("Extension reload completed; tab rescan will retry:", type(scan_error).__name__)
+                return True
+
+            except Exception:
+                continue
+
+        print("Chrome did not expose the Shoonya extension Reload button through UI Automation.")
+        print("No other extension was modified; automatic jKey/login retries will continue.")
+        try:
+            scan_chrome_tabs()
+        except Exception:
+            pass
+        return False
+
+    except Exception as exc:
+        print("Automatic extension reload could not be verified:", type(exc).__name__)
+        return False
+
+
 def get_url(win):
 
     for element in win.descendants(
@@ -1125,7 +1223,7 @@ def open_shoonya_new_tab():
     # Take a screenshot immediately after submitting the URL. This is kept
     # separate from the later login-form detection screenshot so the user
     # has a record of the page state after navigation.
-    time.sleep(1)
+    time.sleep(5)
     navigation_screenshot = BASE_DIR / "shoonya_after_url_paste.png"
     try:
         pyautogui.screenshot().save(str(navigation_screenshot))
@@ -1150,7 +1248,7 @@ def open_shoonya_new_tab():
                 f"Shoonya page is not visible in the extension tab report yet; "
                 f"retrying ({attempt}/3)..."
             )
-            time.sleep(2)
+            time.sleep(4)
 
     raise RuntimeError(
         "The URL was pasted and a screenshot was saved, but the Chrome "
@@ -1196,7 +1294,7 @@ def open_google_chrome():
     print("No existing Chrome window found. Opening Google Chrome now...")
     subprocess.Popen([chrome_path, "--new-window", "about:blank"])
 
-    deadline = time.time() + 10
+    deadline = time.time() + 35
     while time.time() < deadline:
         time.sleep(0.7)
         hwnd, _ = find_chrome_window()
@@ -1285,10 +1383,33 @@ class JKeyHandler(BaseHTTPRequestHandler):
     def do_POST(self):
 
         global captured_jkey
+        global extension_heartbeat_info
         global tab_snapshot
         global reload_result
         global candidate_request_count
         global jkey_diagnostics
+
+        # ----------------------------------------------------
+        # EXTENSION HEARTBEAT
+        # ----------------------------------------------------
+
+        if self.path == "/heartbeat":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                extension_heartbeat_info = {
+                    "extension": str(data.get("extension", ""))[:100],
+                    "version": str(data.get("version", ""))[:30],
+                    "time": str(data.get("time", ""))[:50]
+                }
+                extension_heartbeat_event.set()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+            return
 
         # ----------------------------------------------------
         # TAB REPORT AND RELOAD RESULT
@@ -1352,7 +1473,7 @@ class JKeyHandler(BaseHTTPRequestHandler):
                 jkey_diagnostics = jkey_diagnostics[-30:]
 
                 print(
-                    "Shoonya API request detected (no jKey found): "
+                    "Shoonya request observed (no jKey found): "
                     f"{safe['method']} {safe['host']}{safe['path']} | "
                     f"form fields={safe['form_keys']} | "
                     f"raw body={safe['has_raw_body']}"
@@ -1399,11 +1520,9 @@ class JKeyHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            if "norenwclientweb" not in request_path.lower():
-                self.send_response(400)
-                self.end_headers()
-                return
-
+            # Host ownership is validated above. Different Shoonya web builds
+            # may use different Noren paths, so do not reject a real jKey solely
+            # because the endpoint path name changed.
             if len(jkey) < 12:
                 self.send_response(400)
                 self.end_headers()
@@ -1456,59 +1575,52 @@ def start_jkey_receiver():
 # READ EXCEL CREDENTIALS
 # ============================================================
 
-def read_credentials():
+def open_excel_workbook_first():
+
+    """Open/attach to symbols.xlsx in desktop Excel before doing anything else."""
+
+    global excel_book
 
     if not EXCEL_FILE.exists():
+        raise FileNotFoundError(f"Excel file not found: {EXCEL_FILE}")
 
-        raise FileNotFoundError(
-            f"Excel file not found: {EXCEL_FILE}"
-        )
-
-
-    wb = load_workbook(
-        EXCEL_FILE,
-        data_only=True,
-        read_only=True
-    )
-
-
+    print("Opening Excel workbook first...")
+    excel_book = xw.Book(str(EXCEL_FILE))
     try:
+        excel_book.app.visible = True
+        excel_book.app.screen_updating = True
+        ws = excel_book.sheets[SHEET_NAME]
+        ws.activate()
+        print("Excel workbook opened:", EXCEL_FILE.name)
+        print("Reading credentials and stored jKey directly from the open workbook.")
+    except Exception:
+        raise
 
-        ws = wb[SHEET_NAME]
-
-        user_id = ws["B3"].value
-
-        password = ws["B4"].value
-
-        totp_secret = ws["B5"].value
-
-
-    finally:
-
-        wb.close()
+    return excel_book
 
 
-    if (
-        user_id is None
-        or password is None
-        or totp_secret is None
-    ):
+def read_credentials():
 
-        raise ValueError(
-            "Check LOGIN!B3, B4 and B5."
-        )
+    """Read credentials from the already-open Excel workbook."""
 
+    global excel_book
+    if excel_book is None:
+        open_excel_workbook_first()
 
-    user_id = str(user_id)
+    ws = excel_book.sheets[SHEET_NAME]
+    user_id = ws.range("B3").value
+    password = ws.range("B4").value
+    totp_secret = ws.range("B5").value
 
+    if user_id is None or password is None or totp_secret is None:
+        raise ValueError("Check LOGIN!B3, B4 and B5 in the open Excel workbook.")
+
+    user_id = str(user_id).strip()
     password = str(password)
+    totp_secret = str(totp_secret).strip().replace(" ", "")
 
-    totp_secret = (
-        str(totp_secret)
-        .strip()
-        .replace(" ", "")
-    )
-
+    if not user_id or not password or not totp_secret:
+        raise ValueError("LOGIN!B3, B4 and B5 must not be blank.")
 
     return user_id, password, totp_secret
 
@@ -1696,6 +1808,8 @@ def validate_login_positions(rectangles):
 
 def capture_and_detect():
 
+    global login_field_rectangles
+
     print("\nChecking Shoonya login form...")
 
 
@@ -1757,6 +1871,7 @@ def capture_and_detect():
 
         if positions:
 
+            login_field_rectangles = list(rectangles[:3])
             print("\nLOGIN FORM DETECTED.")
 
 
@@ -1817,12 +1932,10 @@ def capture_and_detect():
                 )
 
 
-            cv2.imwrite(
-                str(
-                    BASE_DIR / "shoonya_detected_boxes.png"
-                ),
-                annotated
-            )
+            detected_path = BASE_DIR / "shoonya_detected_boxes.png"
+            cv2.imwrite(str(detected_path), annotated)
+            print("Annotated login screenshot saved:", detected_path)
+            print("Field order identified top-to-bottom: USER ID, PASSWORD, TOTP, LOGIN BUTTON.")
 
 
             with open(
@@ -1858,36 +1971,202 @@ def capture_and_detect():
 # CLEAR AND PASTE
 # ============================================================
 
+def _chrome_foreground_handle():
+
+    hwnd, _ = find_chrome_window()
+    foreground = int(user32.GetForegroundWindow() or 0)
+    if not hwnd or foreground != int(hwnd):
+        raise RuntimeError("Safety stop: Chrome is not the active foreground window.")
+    return int(hwnd)
+
+
+def _wait_until_resumed(reason="User interruption"):
+
+    """Pause safely until ESC is released, Chrome is foreground, and mouse is still.
+
+    This function never terminates the automation for an ordinary user
+    interruption. It waits in the background and returns only when it is safe
+    to continue. It does not steal focus from another application.
+    """
+
+    global last_expected_mouse
+
+    print(f"\nPAUSED: {reason}")
+    print("Waiting automatically. Return to the Shoonya Chrome window and keep the mouse still...")
+
+    stable_position = None
+    stable_since = None
+
+    while True:
+        try:
+            esc_down = bool(user32.GetAsyncKeyState(0x1B) & 0x8000)
+            foreground_ok = False
+            try:
+                _chrome_foreground_handle()
+                foreground_ok = True
+            except Exception:
+                foreground_ok = False
+
+            try:
+                pos = pyautogui.position()
+                current = (int(pos.x), int(pos.y))
+            except Exception:
+                current = None
+
+            if current is not None and current == stable_position:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+            else:
+                stable_position = current
+                stable_since = time.monotonic() if current is not None else None
+
+            mouse_stable = (
+                stable_since is not None
+                and time.monotonic() - stable_since >= 1.5
+            )
+            at_failsafe_corner = (
+                current is not None
+                and current in getattr(pyautogui, "FAILSAFE_POINTS", [])
+            )
+
+            if not esc_down and foreground_ok and mouse_stable and not at_failsafe_corner:
+                last_expected_mouse = current
+                print("RESUMED: Chrome is active and the mouse is stable.")
+                time.sleep(0.25)
+                return current
+
+        except pyautogui.FailSafeException:
+            # Moving to a PyAutoGUI corner is treated as a pause, not a crash.
+            pass
+        except Exception:
+            pass
+
+        time.sleep(0.20)
+
+
+def _check_user_interrupt(expected_mouse=None):
+
+    """Return True after an interruption has been resolved; never raise for it."""
+
+    global last_expected_mouse
+
+    try:
+        _chrome_foreground_handle()
+    except Exception:
+        _wait_until_resumed("Chrome lost foreground focus")
+        return True
+
+    if user32.GetAsyncKeyState(0x1B) & 0x8000:
+        _wait_until_resumed("ESC pressed")
+        return True
+
+    if expected_mouse is None:
+        expected_mouse = last_expected_mouse
+
+    try:
+        current = pyautogui.position()
+    except Exception:
+        _wait_until_resumed("Mouse state could not be checked")
+        return True
+
+    if expected_mouse is not None:
+        dx = abs(current.x - expected_mouse[0])
+        dy = abs(current.y - expected_mouse[1])
+        if dx > 12 or dy > 12:
+            _wait_until_resumed("Mouse moved during protected entry")
+            return True
+
+    return False
+
+
+def save_login_checkpoint(label, suffix):
+
+    """Save a visual checkpoint while blurring all credential input areas."""
+
+    from PIL import ImageFilter
+
+    shot = pyautogui.screenshot()
+    for x, y, w, h in login_field_rectangles:
+        left = max(0, x - 4)
+        top = max(0, y - 4)
+        right = min(shot.width, x + w + 4)
+        bottom = min(shot.height, y + h + 4)
+        if right > left and bottom > top:
+            region = shot.crop((left, top, right, bottom))
+            region = region.filter(ImageFilter.GaussianBlur(radius=10))
+            shot.paste(region, (left, top))
+
+    path = BASE_DIR / f"shoonya_{suffix}.png"
+    shot.save(str(path))
+    print(f"Screenshot saved ({label}); credential fields blurred: {path.name}")
+
+
 def clear_and_paste(label, x, y, value):
 
-    print(f"\nFilling {label}...")
+    """Enter one credential field, pausing/retrying the whole field on interruption."""
 
+    global last_expected_mouse
 
-    pyautogui.click(x, y)
+    while True:
+        print(f"\nPreparing {label} field...")
 
-    time.sleep(0.3)
+        # If the user interrupted since the previous step, wait and restart
+        # this field from its first click. Never continue a half-finished paste.
+        if _check_user_interrupt():
+            continue
 
+        try:
+            save_login_checkpoint(label, f"before_{label.lower().replace(' ', '_')}")
 
-    pyautogui.hotkey("ctrl", "a")
+            if _check_user_interrupt():
+                continue
 
-    time.sleep(0.2)
+            pyautogui.click(x, y)
+            time.sleep(0.25)
+            expected_mouse = (x, y)
 
+            if _check_user_interrupt(expected_mouse):
+                continue
 
-    pyautogui.press("backspace")
+            pyautogui.hotkey("ctrl", "a")
+            time.sleep(0.15)
+            if _check_user_interrupt(expected_mouse):
+                continue
 
-    time.sleep(0.3)
+            pyautogui.press("backspace")
+            time.sleep(0.15)
+            if _check_user_interrupt(expected_mouse):
+                continue
 
+            # A callable is used for TOTP so every retry after a pause gets a
+            # newly generated code rather than reusing an expired one.
+            field_value = value() if callable(value) else value
+            if _check_user_interrupt(expected_mouse):
+                continue
 
-    pyperclip.copy(value)
+            pyperclip.copy(str(field_value))
+            if _check_user_interrupt(expected_mouse):
+                continue
 
-    pyautogui.hotkey("ctrl", "v")
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.45)
+            if _check_user_interrupt(expected_mouse):
+                continue
 
-    time.sleep(0.5)
+            # Never print the value. Save a screenshot for visual verification.
+            save_login_checkpoint(label, f"after_{label.lower().replace(' ', '_')}")
+            last_expected_mouse = expected_mouse
+            print(f"{label}: entered; value is not displayed in the console.")
+            return
 
-
-    print(
-        f"{label}: cleared and pasted."
-    )
+        except pyautogui.FailSafeException:
+            _wait_until_resumed("PyAutoGUI safety corner reached")
+            # Restart this field; it is cleared before the next paste.
+            continue
+        except Exception as exc:
+            print(f"Temporary {label} entry issue: {type(exc).__name__}")
+            _wait_until_resumed(f"Temporary problem while entering {label}")
+            continue
 
 
 # ============================================================
@@ -1896,37 +2175,94 @@ def clear_and_paste(label, x, y, value):
 
 def refresh_logged_in_shoonya():
 
-    global reload_requested
+    """Ask the extension to reload the exact Shoonya tab after URL verification.
+
+    Never use Ctrl+R here: Chrome focus can move to another tab (for example,
+    chrome://extensions). The extension reads chrome.tabs URLs, selects the
+    exact trade.shoonya.com tab by tab ID, reloads that tab, and reports the
+    resulting URL/status back to Python.
+    """
+
     global scan_requested
+    global reload_requested
+    global tab_snapshot
     global reload_result
 
     print("\nShoonya login form was not detected.")
-    print("v4: NOT logged in yet maybe; refreshing only to catch requests.")
+    print("Checking the actual Chrome tab URL before requesting a refresh...")
 
     if jkey_event.is_set():
         print("A jKey request was already captured.")
         return
 
-    # The extension has already found and activated the Shoonya tab
-    # during scan_chrome_tabs(). Refresh it directly from Python so
-    # this step does not depend on the extension's alarm/polling cycle.
-    print("\nRefreshing the ACTIVE Shoonya tab directly...")
-    print("Using Ctrl+R in Google Chrome; no other tabs are selected.")
-
-    if not activate_chrome():
-        print("Could not bring Google Chrome to the foreground.")
-        print("Cannot safely send Ctrl+R to the Shoonya tab.")
+    # First request a fresh extension tab scan and inspect its exact URL report.
+    try:
+        scan_chrome_tabs()
+    except Exception as exc:
+        print("Could not verify Chrome tab URLs yet:", type(exc).__name__)
+        print("Will retry URL verification; no other tab will be refreshed.")
         return
 
-    time.sleep(0.5)
-    pyautogui.hotkey("ctrl", "r")
-    print("Refresh command sent to the active Shoonya tab.")
+    report = tab_snapshot or {}
+    tabs = report.get("tabs", [])
+    shoonya_tabs = [tab for tab in tabs if is_shoonya_url(tab.get("url", ""))]
 
-    # Give Chrome time to begin navigation and the extension time
-    # to observe the NorenWClientWeb requests generated by the page.
-    time.sleep(1)
+    if not shoonya_tabs:
+        print("URL CHECK FAILED: no tab currently has the exact Shoonya host.")
+        print("No refresh sent. The next retry cycle will scan all tab URLs again.")
+        return
 
-    print("Shoonya refresh requested. Waiting for fresh API requests...")
+    # The extension's current matching rule is trade.shoonya.com. Refuse a
+    # look-alike domain and require the exact expected hostname here too.
+    verified = []
+    for tab in shoonya_tabs:
+        try:
+            parsed = urlparse(str(tab.get("url", "")))
+            if parsed.scheme.lower() == "https" and (parsed.hostname or "").lower().rstrip(".") == SHOONYA_HOST:
+                verified.append(tab)
+        except Exception:
+            continue
+
+    if not verified:
+        print("URL CHECK FAILED: tab URL is not https://trade.shoonya.com.")
+        print("No refresh sent; waiting for a verified Shoonya URL.")
+        return
+
+    target = verified[0]
+    print("Verified Shoonya tab URL:", target.get("url", ""))
+    print("Requesting extension to reload this exact tab by Chrome tab ID...")
+
+    # Ask the extension's chrome.tabs API to reload the verified Shoonya tab.
+    # The extension independently checks the hostname again before reload.
+    tab_snapshot_event.clear()
+    reload_event.clear()
+    reload_result = None
+    with scan_lock:
+        reload_requested = True
+        scan_requested = True
+
+    if not reload_event.wait(50):
+        print("No reload confirmation received from the extension yet.")
+        print("Will rescan and retry. No Ctrl+R fallback is used.")
+        return
+
+    result = tab_snapshot or {}
+    status = str(result.get("reload_status", "NOT_REPORTED"))
+    refreshed_tabs = result.get("tabs", [])
+    refreshed_urls = [
+        str(tab.get("url", "")) for tab in refreshed_tabs
+        if is_shoonya_url(tab.get("url", ""))
+    ]
+
+    print("Extension reload status:", status)
+    for refreshed_url in refreshed_urls:
+        print("Shoonya URL after reload:", refreshed_url)
+
+    if status == "RELOAD_COMPLETE" and refreshed_urls:
+        print("URL-verified Shoonya tab refreshed successfully.")
+        print("Waiting for fresh Shoonya API requests...")
+    else:
+        print("Shoonya tab reload was not confirmed. Keeping the retry loop active.")
 
 
 # ============================================================
@@ -1935,24 +2271,14 @@ def refresh_logged_in_shoonya():
 
 def read_existing_jkey_from_excel():
 
-    """Read LOGIN!B20 without changing the workbook."""
+    """Read LOGIN!B20 from the same open Excel workbook, including unsaved edits."""
 
-    if not EXCEL_FILE.exists():
-        return ""
+    global excel_book
+    if excel_book is None:
+        open_excel_workbook_first()
 
-    wb = load_workbook(
-        EXCEL_FILE,
-        data_only=True,
-        read_only=True
-    )
-
-    try:
-        if SHEET_NAME not in wb.sheetnames:
-            return ""
-        value = wb[SHEET_NAME]["B20"].value
-        return str(value).strip() if value is not None else ""
-    finally:
-        wb.close()
+    value = excel_book.sheets[SHEET_NAME].range("B20").value
+    return str(value).strip() if value is not None else ""
 
 
 # ============================================================
@@ -2021,7 +2347,7 @@ def validate_web_jkey(user_id, password, jkey):
                     "This is UNKNOWN, not automatically invalid."
                 )
                 if attempt < 3:
-                    time.sleep(1)
+                    time.sleep(2)
                 continue
 
             print("Unexpected response type:", last_response_type)
@@ -2053,7 +2379,10 @@ def save_jkey_validation_to_excel(jkey, status, detail):
 
     print("\nSaving jKey validation result to Excel...")
 
-    wb = xw.Book(str(EXCEL_FILE))
+    global excel_book
+    if excel_book is None:
+        open_excel_workbook_first()
+    wb = excel_book
     try:
         ws = wb.sheets[SHEET_NAME]
 
@@ -2095,6 +2424,7 @@ def save_jkey_validation_to_excel(jkey, status, detail):
 def main():
 
     global captured_jkey
+    global last_expected_mouse
 
     server = None
 
@@ -2102,7 +2432,7 @@ def main():
     print("=" * 60)
 
     print(
-        "SHOONYA AUTO LOGIN + CHECK STORED JKEY FIRST (V19)"
+        "SHOONYA AUTO LOGIN + URL-VERIFIED SHOONYA TAB RELOAD + INDEFINITE JKEY RETRY (V24)"
     )
 
     print("=" * 60)
@@ -2120,9 +2450,10 @@ def main():
         reload_event.clear()
 
 
+        print("\nSTEP 1: OPEN EXCEL AND CHECK STORED JKEY FIRST")
+        open_excel_workbook_first()
+
         print("\nReading Excel credentials...")
-
-
         user_id, password, totp_secret = read_credentials()
 
 
@@ -2171,8 +2502,8 @@ def main():
         print("\nChrome extension files created/updated automatically:")
         print(EXT_DIR)
         print(
-            "If the extension source was updated, reload it once at "
-            "chrome://extensions before running this script."
+            "The script will attempt to reload its own Shoonya extension "
+            "automatically; no confirmation is required."
         )
 
         # Start receiver only when a new browser capture is required.
@@ -2182,170 +2513,218 @@ def main():
         # Open or reuse Chrome.
         open_google_chrome()
 
-        # The extension can capture jKey while Chrome tabs are being scanned.
-        # If that has already happened, avoid unnecessary screenshots,
-        # rectangle detection, and login-form retries.
-        if jkey_event.is_set() and captured_jkey:
-            print("\nValid jKey was already captured during browser startup.")
-            print("Skipping login-form screenshots and detection.")
-            positions = None
-        else:
-            # Detect login form only when a jKey has not already arrived.
-            positions = capture_and_detect()
+        # The extension source was just updated. Try to reload only our own
+        # unpacked extension automatically; never click another extension.
+        auto_reload_shoonya_extension()
 
+        # ----------------------------------------------------
+        # INDEFINITE LOGIN + JKEY CAPTURE LOOP
+        # ----------------------------------------------------
+        # Do not exit merely because the first login attempt produced no jKey.
+        # Each cycle re-detects the page, re-enters the fields when the login
+        # form is present, generates a fresh TOTP, submits, and waits again.
+        # If already logged in, it refreshes the Shoonya tab to provoke fresh
+        # web-session requests for the extension to observe.
 
-        if positions:
+        print("\nWaiting for the Chrome extension to become active...")
+        heartbeat_wait_started = time.monotonic()
+        while (
+            not extension_heartbeat_event.is_set()
+            and time.monotonic() - heartbeat_wait_started < 15
+        ):
+            extension_heartbeat_event.wait(2)
+            # Ask the extension's normal tab-scan loop to report tabs too.
+            with scan_lock:
+                global scan_requested
+                scan_requested = True
+            if jkey_event.is_set() and captured_jkey:
+                break
 
-            # ------------------------------------------------
-            # NORMAL LOGIN PATH
-            # ------------------------------------------------
-
-            clear_and_paste(
-                "USER ID",
-                positions[0][0],
-                positions[0][1],
-                user_id
-            )
-
-
-            clear_and_paste(
-                "PASSWORD",
-                positions[1][0],
-                positions[1][1],
-                password
-            )
-
-
+        if extension_heartbeat_event.is_set():
             print(
-                "\nGenerating fresh TOTP..."
+                "Chrome extension heartbeat received: "
+                f"version {extension_heartbeat_info.get('version', 'unknown')}"
             )
+        else:
+            print("No extension heartbeat yet; continuing automatic retries without stopping.")
 
+        login_cycle = 0
+        totp_generated_at = 0.0
 
-            totp_code = pyotp.TOTP(
-                totp_secret
-            ).now()
+        def make_fresh_totp():
+            nonlocal totp_generated_at
+            code = pyotp.TOTP(totp_secret).now()
+            totp_generated_at = time.time()
+            print("Fresh TOTP generated for this login attempt; value hidden.")
+            return code
 
+        def totp_near_expiry():
+            age = time.time() - totp_generated_at
+            seconds_left = 30 - (time.time() % 30)
+            return age >= 22 or seconds_left <= 8
 
+        def submit_login_form(found_positions):
+            """Fill detected controls; restart individual fields after interruptions."""
+            global last_expected_mouse
+
+            while not activate_chrome():
+                _wait_until_resumed("Waiting for Chrome before credential entry")
+
+            _chrome_foreground_handle()
+            p0 = pyautogui.position()
+            last_expected_mouse = (p0.x, p0.y)
+
+            clear_and_paste("USER ID", found_positions[0][0], found_positions[0][1], user_id)
+            clear_and_paste("PASSWORD", found_positions[1][0], found_positions[1][1], password)
+
+            # TOTP is passed as a callable: if the field-entry routine pauses
+            # and retries, it generates a new code after the pause.
             clear_and_paste(
                 "TOTP",
-                positions[2][0],
-                positions[2][1],
-                totp_code
+                found_positions[2][0],
+                found_positions[2][1],
+                make_fresh_totp
             )
 
+            while True:
+                if _check_user_interrupt():
+                    # If a pause consumed most of the TOTP validity window,
+                    # replace it before clicking Login.
+                    if totp_near_expiry():
+                        print("TOTP aged during interruption; entering a fresh code...")
+                        clear_and_paste(
+                            "TOTP",
+                            found_positions[2][0],
+                            found_positions[2][1],
+                            make_fresh_totp
+                        )
+                    continue
 
-            print(
-                "\nClicking Login button..."
-            )
+                if totp_near_expiry():
+                    print("TOTP is close to expiry; refreshing it before Login...")
+                    clear_and_paste(
+                        "TOTP",
+                        found_positions[2][0],
+                        found_positions[2][1],
+                        make_fresh_totp
+                    )
+                    continue
 
+                try:
+                    save_login_checkpoint("before login click", "before_login_click")
+                    if _check_user_interrupt():
+                        continue
+                    print("Clicking Login button...")
+                    pyautogui.click(found_positions[3][0], found_positions[3][1])
+                    print("Login submitted.")
+                    return
+                except pyautogui.FailSafeException:
+                    _wait_until_resumed("Login-button click interrupted")
+                except Exception as click_error:
+                    print("Temporary Login-button issue:", type(click_error).__name__)
+                    _wait_until_resumed("Waiting to retry Login-button click")
 
-            pyautogui.click(
-                positions[3][0],
-                positions[3][1]
-            )
+        while True:
+            # A captured key is not accepted until the read-only Order Book
+            # check confirms it. UNKNOWN is retried; INVALID starts a new login.
+            if jkey_event.is_set() and captured_jkey:
+                print("\nA jKey candidate has arrived. Validating it with Order Book...")
+                status, detail = validate_web_jkey(user_id, password, captured_jkey)
+                save_jkey_validation_to_excel(captured_jkey, status, detail)
 
+                if status == "VALID":
+                    print("\nSUCCESS: jKey is VALID and saved in Excel LOGIN!B20.")
+                    break
 
-            print(
-                "Login submitted."
-            )
+                if status == "INVALID":
+                    print("Captured jKey was rejected/expired. Starting a fresh login/capture cycle...")
+                    captured_jkey = None
+                    jkey_event.clear()
+                    continue
 
+                print("jKey validation is UNKNOWN. Keeping the candidate and retrying validation in 5 seconds...")
+                time.sleep(5)
+                continue
 
-        else:
+            login_cycle += 1
+            print(f"\n================ LOGIN / CAPTURE RETRY CYCLE {login_cycle} ================")
 
-            # ------------------------------------------------
-            # EXISTING SESSION PATH
-            # ------------------------------------------------
+            try:
+                positions = None
+                try:
+                    positions = capture_and_detect()
+                except pyautogui.FailSafeException:
+                    _wait_until_resumed("Login screenshot/detection interrupted")
+                except Exception as detect_error:
+                    print("Temporary login detection error:", type(detect_error).__name__)
+                    _wait_until_resumed("Waiting before retrying login-form detection")
 
-            refresh_logged_in_shoonya()
+                if jkey_event.is_set() and captured_jkey:
+                    continue
 
+                if positions:
+                    print("Login form detected. Re-entering credentials with a fresh TOTP.")
+                    submit_login_form(positions)
+                else:
+                    print("Login form is not visible. Treating page as an existing/logged-in session and refreshing it for a fresh jKey request.")
+                    refresh_logged_in_shoonya()
 
-        print(
-            "\nGoogle Chrome will remain open."
-        )
+            except pyautogui.FailSafeException:
+                _wait_until_resumed("PyAutoGUI interruption; retrying current login cycle")
+            except Exception as cycle_error:
+                print("Temporary login/capture cycle error:", type(cycle_error).__name__, str(cycle_error)[:250])
+                _wait_until_resumed("Temporary error; waiting and retrying the login cycle")
 
+            print(f"Waiting up to {JKEY_TIMEOUT} seconds for jKey...")
+            if jkey_event.wait(JKEY_TIMEOUT) and captured_jkey:
+                continue
 
-        print(
-            f"\nWaiting up to {JKEY_TIMEOUT} seconds for jKey..."
-        )
-
-
-        if jkey_event.wait(JKEY_TIMEOUT):
-
-            if captured_jkey:
-
-                status, detail = validate_web_jkey(
-                    user_id,
-                    password,
-                    captured_jkey
-                )
-
-                save_jkey_validation_to_excel(
-                    captured_jkey,
-                    status,
-                    detail
-                )
-
-            else:
-
-                print(
-                    "No jKey was captured."
-                )
-
-
-        else:
-
-            print(
-                "\nNo jKey request was captured."
-            )
-
-
-            print(
-                "Excel B20 has not been cleared or overwritten."
-            )
-
-
-            print(
-                "If Shoonya is logged in but no jKey arrives, "
-                "check whether the extension is observing "
-                "the relevant NorenWClientWeb request."
-            )
-
-
-            print(
-                "The extension must be enabled in the "
-                "Chrome profile currently running Shoonya."
-            )
-
-            print(
-                f"Matching NorenWClientWeb requests observed: "
-                f"{candidate_request_count}"
-            )
-
+            print("No jKey yet. Keeping Excel B20 unchanged; preparing another automatic retry.")
+            print(f"Shoonya requests observed by extension so far: {candidate_request_count}")
             if jkey_diagnostics:
                 print("Latest safe request diagnostics:")
-                for item in jkey_diagnostics[-5:]:
+                for item in jkey_diagnostics[-3:]:
                     print(
-                        f"  {item.get('method')} "
-                        f"{item.get('host')}{item.get('path')} | "
-                        f"fields={item.get('form_keys')} | "
-                        f"raw_body={item.get('has_raw_body')}"
+                        f"  {item.get('method')} {item.get('host')}{item.get('path')} | "
+                        f"fields={item.get('form_keys')} | raw_body={item.get('has_raw_body')}"
                     )
+            elif not extension_heartbeat_event.is_set():
+                print("The extension has not confirmed it is running yet; the script will keep waiting and retrying.")
             else:
-                print(
-                    "No NorenWClientWeb request matched the extension "
-                    "URL filter during this run."
-                )
+                print("Extension is alive but has not observed a Shoonya request yet. Refreshing and retrying.")
 
+            # If the user is logged in, a page refresh should trigger the web
+            # client's normal session/API requests. If still at login, the next
+            # cycle re-detects all fields and enters a newly generated TOTP.
+            try:
+                refresh_logged_in_shoonya()
+            except Exception as refresh_error:
+                print("Temporary refresh issue:", type(refresh_error).__name__)
+                _wait_until_resumed("Waiting before retrying Shoonya refresh")
+
+            time.sleep(2)
+
+        print("\nGoogle Chrome will remain open. Excel contains the verified jKey.")
+
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt received. The script is paused safely; close the console window to terminate it.")
+        while True:
+            time.sleep(1)
 
     except Exception as e:
 
-        print("\nERROR:")
-
-        print(str(e))
-
-        print(
-            "Chrome has not been closed."
-        )
+        print("\nUNEXPECTED MAIN ERROR:")
+        print(type(e).__name__, str(e)[:500])
+        print("Chrome has not been closed. Waiting and retrying the main workflow...")
+        if server is not None:
+            try:
+                server.shutdown()
+                server.server_close()
+            except Exception:
+                pass
+        time.sleep(3)
+        main()
+        return
 
 
     finally:
