@@ -38,7 +38,7 @@ RECEIVER_HOST = "127.0.0.1"
 RECEIVER_PORT = 8765
 
 # Maximum wait for a fresh jKey request after refreshing Shoonya.
-JKEY_TIMEOUT = 10
+JKEY_TIMEOUT = 5
 
 # Chrome may take up to 30 seconds to poll Python, then up to 45 seconds
 # to finish reloading the Shoonya tab.
@@ -69,7 +69,8 @@ scan_lock = threading.Lock()
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
-SW_RESTORE = 9  # Correct Win32 constant: SW_RESTORE (2 is SW_SHOWMINIMIZED)
+SW_RESTORE = 9  # Restore a minimized Chrome window.
+SW_MAXIMIZE = 3  # Maximize Chrome so screenshots and click coordinates stay consistent.
 
 
 # ============================================================
@@ -495,6 +496,8 @@ user32.IsIconic.argtypes = [
 ]
 
 user32.IsIconic.restype = wintypes.BOOL
+user32.IsZoomed.argtypes = [wintypes.HWND]
+user32.IsZoomed.restype = wintypes.BOOL
 
 user32.ShowWindow.argtypes = [
     wintypes.HWND,
@@ -633,7 +636,7 @@ def find_chrome_window():
 
 
 # ============================================================
-# ACTIVATE CHROME WITHOUT RESIZING
+# ACTIVATE CHROME; MAXIMIZE ONLY WHEN NOT ALREADY MAXIMIZED
 # ============================================================
 
 def activate_chrome():
@@ -661,6 +664,12 @@ def activate_chrome():
             print("Windows did not restore the Chrome window.")
             return False
 
+    # Keep the browser at a consistent full-screen size for screenshot-based
+    # login detection and mouse coordinates. Do not repeatedly resize it.
+    if not user32.IsZoomed(hwnd):
+        user32.ShowWindow(hwnd, SW_MAXIMIZE)
+        time.sleep(0.25)
+
     current_hwnd = user32.GetForegroundWindow()
     current_pid = wintypes.DWORD(0)
     chrome_pid = wintypes.DWORD(0)
@@ -686,11 +695,14 @@ def activate_chrome():
 
     try:
         for _ in range(8):
-            user32.ShowWindow(hwnd, SW_RESTORE)
+            # Do NOT call SW_RESTORE here: it unmaximizes Chrome on every
+            # activation and causes the browser to visibly resize/dance.
+            # Restore/minimize handling and the one-time maximize above are
+            # sufficient; this loop should only request foreground focus.
             user32.BringWindowToTop(hwnd)
             user32.SetActiveWindow(hwnd)
             user32.SetForegroundWindow(hwnd)
-            time.sleep(0.25)
+            time.sleep(0.15)
 
             foreground = int(user32.GetForegroundWindow() or 0)
             if foreground == int(hwnd):
@@ -2020,9 +2032,16 @@ def main():
         # Open or reuse Chrome.
         open_google_chrome()
 
-
-        # Detect login form.
-        positions = capture_and_detect()
+        # The extension can capture jKey while Chrome tabs are being scanned.
+        # If that has already happened, avoid unnecessary screenshots,
+        # rectangle detection, and login-form retries.
+        if jkey_event.is_set() and captured_jkey:
+            print("\nValid jKey was already captured during browser startup.")
+            print("Skipping login-form screenshots and detection.")
+            positions = None
+        else:
+            # Detect login form only when a jKey has not already arrived.
+            positions = capture_and_detect()
 
 
         if positions:
