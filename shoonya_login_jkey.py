@@ -4,6 +4,7 @@ import json
 import threading
 import os
 import shutil
+from datetime import datetime
 import subprocess
 import ctypes
 
@@ -31,6 +32,10 @@ EXCEL_FILE = BASE_DIR / "symbols.xlsx"
 SHEET_NAME = "LOGIN"
 
 EXT_DIR = BASE_DIR / "shoonya_jkey_extension"
+
+# Temporary evidence folder: created on Desktop for each capture run and
+# removed automatically only after the jKey is confirmed VALID.
+SCREENSHOT_DIR = None
 
 SHOONYA_URL = "https://trade.shoonya.com/#/"
 SHOONYA_HOST = "trade.shoonya.com"
@@ -1224,7 +1229,7 @@ def open_shoonya_new_tab():
     # separate from the later login-form detection screenshot so the user
     # has a record of the page state after navigation.
     time.sleep(5)
-    navigation_screenshot = BASE_DIR / "shoonya_after_url_paste.png"
+    navigation_screenshot = screenshot_file("shoonya_after_url_paste.png")
     try:
         pyautogui.screenshot().save(str(navigation_screenshot))
         print("Screenshot saved after URL paste:", navigation_screenshot)
@@ -1802,6 +1807,50 @@ def validate_login_positions(rectangles):
     return positions
 
 
+def create_screenshot_folder():
+    """Create a dedicated Desktop folder for this capture run."""
+    global SCREENSHOT_DIR
+
+    desktop = Path.home() / "Desktop"
+    if not desktop.exists():
+        desktop = BASE_DIR
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    SCREENSHOT_DIR = desktop / f"Shoonya_JKEY_Debug_{stamp}"
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=False)
+
+    print("\\nTemporary screenshot folder created on Desktop:")
+    print(SCREENSHOT_DIR)
+    return SCREENSHOT_DIR
+
+
+def screenshot_file(filename):
+    """Return a path inside the current run's screenshot folder."""
+    folder = SCREENSHOT_DIR if SCREENSHOT_DIR is not None else BASE_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / filename
+
+
+def delete_screenshot_folder_after_success():
+    """Delete only this run's evidence folder after a VALID jKey is saved."""
+    global SCREENSHOT_DIR
+
+    if SCREENSHOT_DIR is None:
+        return
+
+    folder = SCREENSHOT_DIR
+    try:
+        if folder.exists() and folder.is_dir():
+            shutil.rmtree(folder)
+            print("\\nSUCCESS: temporary screenshot folder deleted:")
+            print(folder)
+        SCREENSHOT_DIR = None
+    except Exception as exc:
+        print("WARNING: could not delete temporary screenshot folder:",
+              type(exc).__name__)
+        print("You can remove this folder manually after checking it:", folder)
+
+
 # ============================================================
 # SCREENSHOT AND LOGIN DETECTION
 # ============================================================
@@ -1814,7 +1863,7 @@ def capture_and_detect():
 
 
     screenshot_path = (
-        BASE_DIR / "shoonya_login_screen.png"
+        screenshot_file("shoonya_login_screen.png")
     )
 
 
@@ -1932,14 +1981,14 @@ def capture_and_detect():
                 )
 
 
-            detected_path = BASE_DIR / "shoonya_detected_boxes.png"
+            detected_path = screenshot_file("shoonya_detected_boxes.png")
             cv2.imwrite(str(detected_path), annotated)
             print("Annotated login screenshot saved:", detected_path)
             print("Field order identified top-to-bottom: USER ID, PASSWORD, TOTP, LOGIN BUTTON.")
 
 
             with open(
-                BASE_DIR / "shoonya_login_positions.txt",
+                screenshot_file("shoonya_login_positions.txt"),
                 "w",
                 encoding="utf-8"
             ) as f:
@@ -2096,9 +2145,68 @@ def save_login_checkpoint(label, suffix):
             region = region.filter(ImageFilter.GaussianBlur(radius=10))
             shot.paste(region, (left, top))
 
-    path = BASE_DIR / f"shoonya_{suffix}.png"
+    path = screenshot_file(f"shoonya_{suffix}.png")
     shot.save(str(path))
     print(f"Screenshot saved ({label}); credential fields blurred: {path.name}")
+
+
+def ensure_verified_shoonya_tab_for_input(label):
+    """Before every credential paste, prove the active target by tab number + URL.
+
+    The extension reads Chrome tab URLs and activates the exact Shoonya tab.
+    Python refuses to type if the report does not contain HTTPS trade.shoonya.com.
+    """
+    print(f"\\nURL/TAB safety check before {label} entry...")
+    last_error = None
+
+    while True:
+        try:
+            tab_count, tab_number = scan_chrome_tabs()
+            report = tab_snapshot or {}
+            tabs = report.get("tabs", [])
+
+            matches = []
+            for tab in tabs:
+                raw_url = str(tab.get("url", "")).strip()
+                try:
+                    parsed = urlparse(raw_url)
+                    if (
+                        parsed.scheme.lower() == "https"
+                        and (parsed.hostname or "").lower().rstrip(".") == SHOONYA_HOST
+                    ):
+                        matches.append((int(tab.get("number", 0)), raw_url))
+                except Exception:
+                    continue
+
+            if not matches:
+                raise RuntimeError("No exact HTTPS Shoonya tab was reported.")
+
+            # Prefer the tab number returned as the extension's active Shoonya tab.
+            chosen = next(
+                (item for item in matches if item[0] == int(tab_number or 0)),
+                matches[0]
+            )
+            verified_number, verified_url = chosen
+
+            # scan_chrome_tabs() receives the extension report after it activates
+            # the matching tab. Confirm Chrome is foreground before mouse input.
+            _chrome_foreground_handle()
+            print(
+                f"TARGET VERIFIED for {label}: Chrome tab {verified_number}/{tab_count}"
+            )
+            print(f"Verified URL: {verified_url}")
+            return verified_number, verified_url
+
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"Target URL/tab verification not ready for {label}: "
+                f"{type(exc).__name__}. Waiting and retrying; no text entered."
+            )
+            _wait_until_resumed(
+                f"Waiting for the verified Shoonya tab before {label} entry"
+            )
+            time.sleep(1)
 
 
 def clear_and_paste(label, x, y, value):
@@ -2116,6 +2224,11 @@ def clear_and_paste(label, x, y, value):
             continue
 
         try:
+            ensure_verified_shoonya_tab_for_input(label)
+
+            if _check_user_interrupt():
+                continue
+
             save_login_checkpoint(label, f"before_{label.lower().replace(' ', '_')}")
 
             if _check_user_interrupt():
@@ -2432,7 +2545,7 @@ def main():
     print("=" * 60)
 
     print(
-        "SHOONYA AUTO LOGIN + URL-VERIFIED SHOONYA TAB RELOAD + INDEFINITE JKEY RETRY (V24)"
+        "SHOONYA AUTO LOGIN + URL-VERIFIED SHOONYA TAB RELOAD + INDEFINITE JKEY RETRY + URL/TAB VERIFIED CREDENTIAL ENTRY + TEMP SCREENSHOT CLEANUP (V25)"
     )
 
     print("=" * 60)
@@ -2497,6 +2610,7 @@ def main():
 
         # Only create/update the extension and start Chrome automation
         # after the stored jKey is missing, invalid, expired, or unconfirmed.
+        create_screenshot_folder()
         write_extension_files()
 
         print("\nChrome extension files created/updated automatically:")
@@ -2611,6 +2725,7 @@ def main():
                     continue
 
                 try:
+                    ensure_verified_shoonya_tab_for_input("LOGIN BUTTON")
                     save_login_checkpoint("before login click", "before_login_click")
                     if _check_user_interrupt():
                         continue
@@ -2634,6 +2749,7 @@ def main():
 
                 if status == "VALID":
                     print("\nSUCCESS: jKey is VALID and saved in Excel LOGIN!B20.")
+                    delete_screenshot_folder_after_success()
                     break
 
                 if status == "INVALID":
