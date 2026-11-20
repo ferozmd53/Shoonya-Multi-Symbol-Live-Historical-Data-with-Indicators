@@ -24,6 +24,9 @@ SPEC = [
     ("PINK_FIRST_BAR_DATE", "2023-01-02", "date_opt",
      "date of the FIRST bar on your TradingView daily chart (the step line is seeded from it); blank = all bars",
      "PM_FIRST_BAR_DATE"),
+    ("WEEKLY_FIRST_BAR_DATE", "2020-01-06", "date_opt",
+     "WEEKLY block (symbols!AM:AX): Monday of the FIRST bar on your TradingView weekly chart (step line seed); "
+     "blank = all weeks loaded", "WEEKLY_FIRST_BAR_DATE"),
     ("NWE_BANDWIDTH", 3.0, ("float", 0.01, 1000), "Nadaraya-Watson Bandwidth (h)", "NWE_H"),
     ("NWE_MULT", 0.9, ("float", 0.0, 100), "Nadaraya-Watson mult", "NWE_MULT"),
     ("NWE_SOURCE", "open", ("choice", OHLC), "Nadaraya-Watson source: open / high / low / close", "NWE_SRC"),
@@ -52,7 +55,8 @@ SPEC = [
 DEFAULTS = {k: d for k, d, *_ in SPEC}
 ATTR = {k: a for k, _, _, _, a in SPEC}
 # changing these needs the candles (re)loaded; everything else is just recalculated
-DATA_KEYS = {"DAYS_TO_DOWNLOAD", "USE_SQLITE_CACHE", "PINK_FIRST_BAR_DATE", "NWE_REPAINT"}
+DATA_KEYS = {"DAYS_TO_DOWNLOAD", "USE_SQLITE_CACHE", "PINK_FIRST_BAR_DATE", "WEEKLY_FIRST_BAR_DATE",
+             "NWE_REPAINT"}
 
 
 def _blank(v):
@@ -179,7 +183,7 @@ def apply_to(cfg, values):
     """Copy validated settings onto the Config class."""
     for key, value in values.items():
         attr = ATTR[key]
-        if key == "PINK_FIRST_BAR_DATE":
+        if key in ("PINK_FIRST_BAR_DATE", "WEEKLY_FIRST_BAR_DATE"):
             value = value.isoformat() if value else None
         setattr(cfg, attr, value)
 

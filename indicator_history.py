@@ -25,6 +25,23 @@ def _f(df, col):
     return df[col].astype(float).values
 
 
+def to_weekly(df):
+    """Daily candles -> weekly candles (Mon-Fri week, dated by its Monday like TradingView).
+
+    open = first day's open, high = max, low = min, close = last day's close, volume = sum.
+    The last row is the week in progress when the latest daily candle is mid-week.
+    """
+    d = df[["datetime", "open", "high", "low", "close", "volume"]].copy()
+    d["week"] = d["datetime"].dt.to_period("W-SUN").dt.start_time
+    g = d.groupby("week", sort=True)
+    out = pd.DataFrame({
+        "open": g["open"].first(), "high": g["high"].max(), "low": g["low"].min(),
+        "close": g["close"].last(), "volume": g["volume"].sum(),
+    })
+    out.index.name = "datetime"
+    return out.reset_index()
+
+
 def _trim_first_bar(df, first_bar_date):
     if first_bar_date:
         return df[df["datetime"] >= pd.Timestamp(first_bar_date)].reset_index(drop=True)

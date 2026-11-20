@@ -24,3 +24,12 @@ Change a value and it is applied within ~2 seconds (no restart); invalid values 
 
 * **AS_OF_DATE** (e.g. `2026-11-10`): the HISTORICAL block shows that day's candle and the indicator values exactly as they were that day. Blank = latest. The live block is not affected.
 * **INDICATOR_HISTORY** sheet: type a symbol in `B1` and the number of days in `B2` - a table of the indicator values for each of those days (newest first) is filled in.
+
+## Workbook and weekly block
+
+* The Excel workbook is now **VII_CLASS.xlsm** (put it beside `run.py`).
+* Sheet **symbols**, columns **AM:AX** = WEEKLY data + indicators for each symbol (AL is a blank spacer after the daily history A..AK):
+  `Week (Mon)`, `Open`, `High`, `Low`, `Close`, `Volume`, `NADARYA BUY`, `NADARYA SELL`, `BB Upper`, `BB Lower`, `upperpink`, `mirrorUpperBand`.
+  Weekly candles are built from the daily candles (Mon-Fri); the last row is the week in progress until its Friday has passed.
+  Same indicator settings as the daily block, calculated on weekly bars.
+* **WEEKLY_FIRST_BAR_DATE** (LOGIN settings, default `2020-01-06`): Monday of the first bar on your TradingView weekly chart - the weekly step line (`upperpink`) is seeded from it. `AS_OF_DATE` also applies to the weekly block.

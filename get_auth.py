@@ -30,7 +30,7 @@ INPUT_FILL_DELAY_SEC = 3.0
 FIELD_WAIT_SEC       = 40     # how long to wait for a login field to appear before giving up
 LAUNCH_TIMEOUT_SEC   = 20
 AUTH_CACHE_TTL_SEC   = 120.0
-WORKBOOK_NAME        = "PythonTrader_Terminal_LMT.xlsm"
+WORKBOOK_NAME        = "VII_CLASS.xlsm"
 
 _auth_cache = {"code": None, "ts": 0.0}
 _auth_lock  = threading.Lock()

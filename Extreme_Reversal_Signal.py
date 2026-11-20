@@ -219,7 +219,7 @@ warnings.filterwarnings('ignore')
 # Locate the workbook beside run.py / in the working folder first.
 # The installed package may live in Python\\Lib\\site-packages, so do not
 # assume the workbook is stored beside this module.
-WORKBOOK_NAME = "PythonTrader_Terminal_LMT.xlsm"
+WORKBOOK_NAME = "VII_CLASS.xlsm"
 RUN_FOLDER = Path(sys.argv[0]).resolve().parent if sys.argv and sys.argv[0] else Path.cwd()
 PACKAGE_FOLDER = Path(__file__).resolve().parent
 
@@ -330,6 +330,15 @@ def get_hist_headers():
         'upperpink', 'mirrorUpperBand'
     ]
 
+def get_weekly_headers():
+    """Weekly block (columns AM onward): same fields as the daily history, one row per symbol."""
+    return [
+        'Week (Mon)', 'Open', 'High', 'Low', 'Close', 'Volume',
+        'NADARYA BUY', 'NADARYA SELL',
+        'BB Upper', 'BB Lower',
+        'upperpink', 'mirrorUpperBand'
+    ]
+
 def get_order_headers():
     """R:AB order panel with BUY/SELL limit price (PRC), broker status and order number."""
     return [
@@ -374,6 +383,9 @@ class Config:
     # must be FIXED (otherwise the seed drifts every day). Set this to the date of
     # the first bar your TradingView chart loaded to line the step up with it.
     PM_FIRST_BAR_DATE = '2023-01-02'
+    # WEEKLY block: first weekly bar of the TradingView weekly chart (a Monday). The weekly step line
+    # (upperpink) needs 200+ weekly bars, so this reaches further back than the daily date.
+    WEEKLY_FIRST_BAR_DATE = '2020-01-06'
     # SQLite cache of the DAILY candles (candle_cache.py): the full history is downloaded once,
     # later runs only fetch the last few days (or nothing when the cache is already up to date).
     USE_CANDLE_CACHE = True
@@ -408,6 +420,8 @@ class Config:
     # Orders start right after the live block; history right after the orders.
     ORDER_START = get_column_letter(get_column_number(LIVE_START) + len(get_live_headers()))
     HIST_START = get_column_letter(get_column_number(ORDER_START) + len(get_order_headers()))
+    # Weekly data + indicators start at column AM (one spacer column AL after the daily history AK).
+    WEEKLY_START = 'AM'
 
 # ============================================
 # AUTO-CALCULATE COLUMN POSITIONS
@@ -416,16 +430,22 @@ class Config:
 LIVE_COUNT = len(get_live_headers())
 HIST_COUNT = len(get_hist_headers())
 ORDER_COUNT = len(get_order_headers())
+WEEKLY_COUNT = len(get_weekly_headers())
 
 # Get all column ranges
 LIVE_COLS = get_column_range(Config.LIVE_START, LIVE_COUNT)
 HIST_COLS = get_column_range(Config.HIST_START, HIST_COUNT)
 ORDER_COLS = get_column_range(Config.ORDER_START, ORDER_COUNT)
+WEEKLY_COLS = get_column_range(Config.WEEKLY_START, WEEKLY_COUNT)
 
 # Auto-calculate END columns
 LIVE_END = LIVE_COLS[-1] if LIVE_COLS else Config.LIVE_START
 HIST_END = HIST_COLS[-1] if HIST_COLS else Config.HIST_START
 ORDER_END = ORDER_COLS[-1] if ORDER_COLS else Config.ORDER_START
+WEEKLY_END = WEEKLY_COLS[-1]
+
+if get_column_number(Config.WEEKLY_START) <= get_column_number(HIST_END):
+    raise ValueError(f"WEEKLY_START {Config.WEEKLY_START} overlaps the daily history block ending at {HIST_END}")
 
 # Order-panel ranges derived from the order columns (never hard-code letters)
 ORDER_ALL = f"{ORDER_COLS[0]}2:{ORDER_COLS[10]}200"          # Quantity .. SELL Order No
@@ -433,7 +453,7 @@ ORDER_BUY_BLOCK = f"{ORDER_COLS[3]}2:{ORDER_COLS[5]}200"     # BUY PRC, status, 
 ORDER_SELL_BLOCK = f"{ORDER_COLS[8]}2:{ORDER_COLS[10]}200"   # SELL PRC, status, order no
 
 # Get ALL columns in order: A, LIVE, ORDERS, HISTORICAL
-ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + ORDER_COLS + HIST_COLS
+ALL_COLS = [Config.SYMBOL_COL] + LIVE_COLS + ORDER_COLS + HIST_COLS + WEEKLY_COLS
 
 # ============================================
 # API CLASS
@@ -588,7 +608,11 @@ def history_days():
     if Config.PM_FIRST_BAR_DATE:
         first = datetime.strptime(Config.PM_FIRST_BAR_DATE, '%Y-%m-%d').date()
         pm = (datetime.now().date() - first).days + 30
-    return max(Config.LOAD_DAYS, nwe, pm)
+    wk = 0
+    if Config.WEEKLY_FIRST_BAR_DATE:
+        first_w = datetime.strptime(Config.WEEKLY_FIRST_BAR_DATE, '%Y-%m-%d').date()
+        wk = (datetime.now().date() - first_w).days + 30
+    return max(Config.LOAD_DAYS, nwe, pm, wk)
 
 
 def indicator_params():
@@ -664,6 +688,30 @@ def fetch_historical_data(symbol):
     except Exception as e:
         print(f"Error fetching data: {e}")
         return None
+
+
+def _weekly_row(base, first_bar_date, as_of=None):
+    """Latest weekly candle + indicators as the same dict format as hist['yesterday'] ({} if unavailable).
+
+    base: daily candles. as_of: cut the daily candles at that date first (AS_OF_DATE view).
+    """
+    try:
+        daily = base if as_of is None else base[base['datetime'] <= pd.Timestamp(as_of)]
+        if len(daily) < 3:
+            return {}
+        wk = indicator_history.to_weekly(daily.reset_index(drop=True))
+        if len(wk) < 3:
+            return {}
+        week_start = wk['datetime'].iloc[-1].date()
+        # a week is final once its Friday has passed; the week in progress cannot move the step line yet
+        confirmed = True if as_of is not None else datetime.now().date() > week_start + timedelta(days=4)
+        params = dict(indicator_params(), first_bar_date=first_bar_date)
+        row = _row_from_snapshot(indicator_history.snapshot(wk, params, confirmed))
+        row['date'] = week_start.strftime('%d/%m/%Y')
+        return row
+    except Exception as exc:
+        print(f"⚠️ Weekly indicators: {exc}")
+        return {}
 
 
 def _build_hist(df, symbol, source):
@@ -766,6 +814,9 @@ def _build_hist(df, symbol, source):
             'last_date': yesterday['datetime'].date(),
             'yesterday': yesterday_data,
             'asof': asof_row,
+            'weekly': _weekly_row(base, Config.WEEKLY_FIRST_BAR_DATE),
+            'weekly_asof': (_weekly_row(base, Config.WEEKLY_FIRST_BAR_DATE, Config.AS_OF_DATE)
+                            if Config.AS_OF_DATE else None),
         }
 
     except Exception as e:
@@ -1670,7 +1721,7 @@ def update_excel_bulk():
 
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
-        live_rows, hist_rows = [], []
+        live_rows, hist_rows, weekly_rows = [], [], []
 
         for symbol_cell in symbols_data:
             if not symbol_cell:
@@ -1678,6 +1729,7 @@ def update_excel_bulk():
                     live_rows.append([''] * LIVE_COUNT)
                 if hist_due:
                     hist_rows.append([''] * HIST_COUNT)
+                    weekly_rows.append([''] * WEEKLY_COUNT)
                 continue
 
             try:
@@ -1687,6 +1739,7 @@ def update_excel_bulk():
                     live_rows.append([''] * LIVE_COUNT)
                 if hist_due:
                     hist_rows.append([''] * HIST_COUNT)
+                    weekly_rows.append([''] * WEEKLY_COUNT)
                 continue
 
             token_key = symbol_tokens.get(symbol)
@@ -1725,6 +1778,19 @@ def update_excel_bulk():
                     yesterday.get('bb_upper', ''), yesterday.get('bb_lower', ''),
                     yesterday.get('pink', ''), yesterday.get('mirror', '')
                 ])
+                if not hist:
+                    week = {}
+                elif Config.AS_OF_DATE:
+                    week = hist.get('weekly_asof') or {}
+                else:
+                    week = hist.get('weekly') or {}
+                weekly_rows.append([
+                    week.get('date', ''), week.get('open', ''), week.get('high', ''),
+                    week.get('low', ''), week.get('close', ''), week.get('volume', ''),
+                    week.get('nwe_buy', ''), week.get('nwe_sell', ''),
+                    week.get('bb_upper', ''), week.get('bb_lower', ''),
+                    week.get('pink', ''), week.get('mirror', '')
+                ])
 
         if symbols_data:
             last_row = 1 + len(symbols_data)
@@ -1734,6 +1800,7 @@ def update_excel_bulk():
                 last_indicator_excel_update = now
             if hist_due and hist_rows:
                 ws.range(f"{Config.HIST_START}2:{HIST_END}{last_row}").value = hist_rows
+                ws.range(f"{Config.WEEKLY_START}2:{WEEKLY_END}{last_row}").value = weekly_rows
                 last_hist_excel_update = now
 
     except Exception as exc:
@@ -1890,8 +1957,11 @@ def setup_excel_headers():
         ws.range(f"{ORDER_COLS[8]}2:{ORDER_COLS[8]}200").clear_contents()
         ws.range("1:1").clear_contents()
         # Removed historical BUY/SELL/Signal columns (AO:AQ): clear the stale values.
-        _stale = get_column_range(get_column_letter(get_column_number(HIST_END) + 1), 3)
-        ws.range(f"{_stale[0]}2:{_stale[-1]}200").clear_contents()
+        # (only the spacer column between the daily history and the weekly block is cleared now)
+        _spacer = get_column_range(get_column_letter(get_column_number(HIST_END) + 1),
+                                   get_column_number(Config.WEEKLY_START) - get_column_number(HIST_END) - 1)
+        if _spacer:
+            ws.range(f"{_spacer[0]}2:{_spacer[-1]}200").clear_contents()
         
         # Build headers in correct order: Symbol, LIVE, ORDERS, HISTORICAL
         headers = ['Symbol']
@@ -1920,6 +1990,14 @@ def setup_excel_headers():
             cell.font.color = (255, 255, 255)
             cell.font.bold = True
         
+        # Weekly block (AM onward): own header row, purple
+        for offset, header in enumerate(get_weekly_headers()):
+            cell = ws.range(f"{WEEKLY_COLS[offset]}1")
+            cell.value = header
+            cell.color = (112, 48, 160)
+            cell.font.color = (255, 255, 255)
+            cell.font.bold = True
+
         # Set column widths
         # Column widths: give a column its default width ONLY while it is still at Excel's
         # default width.  Widths you set yourself are never overwritten on the next start.
