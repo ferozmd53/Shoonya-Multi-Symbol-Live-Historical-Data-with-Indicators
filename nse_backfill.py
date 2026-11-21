@@ -8,6 +8,11 @@ cache separate from Shoonya's candle cache.
 import asyncio
 import re
 import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+
+import requests
 from datetime import date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -53,7 +58,7 @@ def _connect(db_path):
 
 
 def _load_cached(db_path, symbol):
-    with _connect(db_path) as con:
+    with closing(_connect(db_path)) as con:
         rows = con.execute(
             "SELECT date, open, high, low, close, volume FROM nse_candles "
             "WHERE symbol=? ORDER BY date", (symbol,)
@@ -82,10 +87,11 @@ def _save_rows(db_path, symbol, frame):
         except Exception:
             continue
     if rows:
-        with _connect(db_path) as con:
+        with closing(_connect(db_path)) as con:
             con.executemany(
                 "INSERT OR REPLACE INTO nse_candles VALUES (?,?,?,?,?,?,?)", rows
             )
+            con.commit()
     return len(rows)
 
 
@@ -177,6 +183,52 @@ async def _fetch_one(session, semaphore, symbol, start_date, end_date):
     return pd.DataFrame()
 
 
+def _fetch_one_sync(symbol, start_date, end_date):
+    params = {
+        "from": start_date.strftime("%d-%m-%Y"),
+        "to": end_date.strftime("%d-%m-%Y"),
+        "symbol": symbol,
+        "type": "priceVolumeDeliverable",
+        "series": "ALL",
+        "csv": "true",
+    }
+    for attempt in range(1, 4):
+        try:
+            with requests.Session() as session:
+                session.headers.update(HEADERS)
+                session.get(NSE_HOME, timeout=20)
+                time.sleep(0.2)
+                session.get(NSE_REPORT, timeout=20)
+                response = session.get(NSE_HISTORY, params=params, timeout=60)
+                if response.status_code in (401, 403, 429) or response.status_code >= 500:
+                    raise RuntimeError("HTTP " + str(response.status_code))
+                response.raise_for_status()
+                return _parse_csv(response.text, symbol)
+        except Exception as exc:
+            if attempt == 3:
+                print(
+                    f"[NSE BACKFILL] FAILED {symbol} {start_date} to {end_date}: {exc}"
+                )
+                return pd.DataFrame()
+            time.sleep(0.7 * (2 ** (attempt - 1)))
+    return pd.DataFrame()
+
+
+def _fetch_range_sync(symbol, start_date, end_date, max_concurrent=3):
+    chunks = []
+    cursor = start_date
+    while cursor <= end_date:
+        chunk_end = min(cursor + timedelta(days=179), end_date)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+    with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+        results = list(pool.map(
+            lambda item: _fetch_one_sync(symbol, item[0], item[1]), chunks
+        ))
+    good = [frame for frame in results if frame is not None and not frame.empty]
+    return pd.concat(good, ignore_index=True) if good else pd.DataFrame()
+
+
 async def _fetch_range(symbol, start_date, end_date, max_concurrent=3):
     timeout = aiohttp.ClientTimeout(total=60, connect=20)
     connector = aiohttp.TCPConnector(limit=max_concurrent, limit_per_host=max_concurrent)
@@ -225,16 +277,13 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
     The current Pine port reports ATR READY after max(start_bar+1,
     atr_len+atr_highest-1) weekly candles. Existing NSE cache is reused.
     """
-    if aiohttp is None:
-        print("[NSE BACKFILL] aiohttp is not installed; skipping older NSE data")
-        return pd.DataFrame()
-
     raw_symbol = str(symbol or "").strip().upper()
     if raw_symbol.endswith("-EQ"):
         nse_symbol = raw_symbol[:-3]
     else:
         nse_symbol = raw_symbol
-    if not nse_symbol or nse_symbol in _INDEX_NAMES:
+    index_key = re.sub(r"[^A-Z0-9]", "", nse_symbol)
+    if not nse_symbol or index_key in _INDEX_NAMES:
         return pd.DataFrame()
 
     try:
@@ -286,7 +335,12 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
                 f"[NSE BACKFILL] {nse_symbol}: downloading only "
                 f"{start_date} to {end_date}"
             )
-            fetched = asyncio.run(_fetch_range(nse_symbol, start_date, end_date))
+            if aiohttp is not None:
+                fetched = asyncio.run(_fetch_range(nse_symbol, start_date, end_date))
+            else:
+                # The existing Shoonya SDK already installs requests; this keeps
+                # backfill working with --no-deps package reinstalls too.
+                fetched = _fetch_range_sync(nse_symbol, start_date, end_date)
             if fetched.empty:
                 print(
                     f"[NSE BACKFILL] {nse_symbol}: NSE returned no older EQ candles "
