@@ -1,9 +1,10 @@
-"""NSE older-history backfill for weekly ATR warm-up.
+"""NSE older-history backfill for stable weekly ATR initialization.
 
-Only downloads NSE cash-equity candles older than the first Shoonya candle.
-Stops as soon as the combined daily history contains enough weekly bars for
-the configured upperpink ATR/RMA warm-up. NSE rows are kept in a small SQLite
-cache separate from Shoonya's candle cache.
+Downloads the available NSE cash-equity history back to the configured,
+fixed weekly calculation anchor (normally 2010-01-01), not merely until the
+minimum ATR warm-up count is reached. This keeps Wilder RMA initialization
+consistent when the amount of downloaded history changes between runs.
+NSE rows are cached separately from Shoonya's more recent candle history.
 """
 import asyncio
 import re
@@ -310,29 +311,18 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
             return cached.reset_index(drop=True)
 
         print(
-            f"[NSE BACKFILL] {nse_symbol}: need older candles; "
-            f"weekly ATR warm-up {have_weeks}/{required_weeks}"
-        )
-
-        # Extend backwards in bounded windows. Each pass stops as soon as the
-        # combined history meets the exact warm-up requirement.
-        earliest_known = min(
-            [shoonya_first] + (
-                [cached["datetime"].min().date()] if not cached.empty else []
-            )
-        )
-        while have_weeks < required_weeks and earliest_known > start_limit:
-            missing_weeks = required_weeks - have_weeks
-            # Add only a three-week calendar buffer for holidays/partial weeks.
-            # Requests are split into <=180-day NSE chunks.
-            calendar_days = min(420, max(42, (missing_weeks + 3) * 7))
+            f"[NSE BACKFILL] {ns        # Always extend to the fixed calculation anchor, even when the
+        # minimum 299-week ATR warm-up is already available. Stopping at the
+        # warm-up threshold makes Wilder RMA depend on how much history happened
+        # to be downloaded for a particular symbol.
+        while earliest_known > start_limit:
             end_date = earliest_known - timedelta(days=1)
-            start_date = max(start_limit, end_date - timedelta(days=calendar_days - 1))
+            start_date = max(start_limit, end_date - timedelta(days=419))
             if start_date > end_date:
                 break
 
             print(
-                f"[NSE BACKFILL] {nse_symbol}: downloading only "
+                f"[NSE BACKFILL] {nse_symbol}: completing fixed history "
                 f"{start_date} to {end_date}"
             )
             if aiohttp is not None:
@@ -341,10 +331,12 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
                 # The existing Shoonya SDK already installs requests; this keeps
                 # backfill working with --no-deps package reinstalls too.
                 fetched = _fetch_range_sync(nse_symbol, start_date, end_date)
+
             if fetched.empty:
                 print(
-                    f"[NSE BACKFILL] {nse_symbol}: NSE returned no older EQ candles "
-                    f"for {start_date} to {end_date}; stopping"
+                    f"[NSE BACKFILL] WARNING {nse_symbol}: NSE returned no older EQ "
+                    f"candles for {start_date} to {end_date}; cannot verify earlier "
+                    f"history (possibly before listing or NSE data unavailable)"
                 )
                 break
 
@@ -356,13 +348,26 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
             combined = pd.concat([cached, shoonya], ignore_index=True)
             combined = combined.sort_values("datetime").drop_duplicates("datetime", keep="last")
             have_weeks = _weekly_count(combined, start_limit)
-            earliest_known = min(
+
+            new_earliest = min(
                 shoonya_first,
                 cached["datetime"].min().date() if not cached.empty else shoonya_first
             )
             print(
                 f"[NSE BACKFILL] {nse_symbol}: saved {saved} NSE candles; "
-                f"warm-up {have_weeks}/{required_weeks}"
+                f"weekly history {have_weeks}/{required_weeks}; "
+                f"oldest available candle {new_earliest}"
+            )
+            if new_earliest >= earliest_known:
+                print(
+                    f"[NSE BACKFILL] WARNING {nse_symbol}: no earlier candle was "
+                    f"added; stopping to avoid repeating the same request"
+                )
+                break
+
+            earliest_known = new_earliest
+            if start_date == start_limit:
+                breakhave_weeks}/{required_weeks}"
             )
 
             if start_date == start_limit:
