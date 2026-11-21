@@ -12,7 +12,6 @@ A provisional current week is calculated in memory and is never saved as a
 completed ATR row.
 """
 import sqlite3
-from contextlib import closing
 from pathlib import Path
 
 import numpy as np
