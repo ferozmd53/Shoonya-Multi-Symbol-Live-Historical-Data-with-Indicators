@@ -14,3 +14,7 @@ websocket-client>=1.8.0
 # OPTIONAL — uncomment ONLY if you have MSVC Build Tools installed,
 # or a PyYAML wheel is available for your Python version:
 # NorenRestApiOAuth>=0.0.41
+
+# OPTIONAL but recommended — weekly upperpink from TradingView's own weekly candles (tv_weekly.py).
+# Without it the weekly upperpink falls back to the local (Shoonya/NSE) calculation.
+# pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git

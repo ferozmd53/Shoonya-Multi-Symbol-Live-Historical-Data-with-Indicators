@@ -385,6 +385,7 @@ import candle_cache
 import nse_backfill
 import indicator_settings
 import indicator_history
+import tv_weekly
 
 # ============================================
 # CONFIGURATION - FULLY CUSTOMIZABLE
@@ -775,7 +776,7 @@ def _row_from_snapshot(snap):
     }
 
 
-def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
+def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None, symbol=None):
     """Build a complete weekly OHLCV + indicator snapshot from daily candles."""
     try:
         if base is None or base.empty:
@@ -868,14 +869,17 @@ def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
         # every week and the step line drifts away from TradingView.
         params['start_bar'] = Config.WEEKLY_START_BAR
         params['step_lookback'] = 0
-        return indicator_history.snapshot(weekly, params, last_bar_confirmed)
+        # Weekly upperpink from TradingView's own weekly candles when available
+        # (background download; falls back to the local calculation until ready).
+        override = tv_weekly.step_by_week(symbol, last_bar_confirmed)
+        return indicator_history.snapshot(weekly, params, last_bar_confirmed, override)
     except Exception as exc:
         print(f"⚠️ Weekly calculation: {exc}")
         return None
 
 
 def _weekly_history_row(symbol, base, as_of=None):
-    snap = _weekly_snapshot(base, as_of=as_of)
+    snap = _weekly_snapshot(base, as_of=as_of, symbol=symbol)
     if not snap:
         return [''] * 13
     return [
@@ -889,7 +893,7 @@ def _weekly_history_row(symbol, base, as_of=None):
 def _weekly_live_row(symbol, base, live_bar):
     # Keep the live weekly candle provisional until TradingView's Friday
     # 15:30 IST close; _weekly_snapshot applies that confirmation check.
-    snap = _weekly_snapshot(base, live_bar=live_bar, last_bar_confirmed=None)
+    snap = _weekly_snapshot(base, live_bar=live_bar, last_bar_confirmed=None, symbol=symbol)
     if not snap:
         return [''] * 14
     tick_time = live_bar.get('timestamp')
@@ -2527,7 +2531,7 @@ def refresh_indicator_history(force=False):
     hist = historical_data_cache.get(key)
     params = indicator_params()
     sig = (key, days, tuple(sorted(params.items(), key=lambda kv: kv[0])), id(hist) if hist else None,
-           datetime.now().date())
+           datetime.now().date(), tv_weekly.version(key))
     if sig == _history_sig and not force:
         return
     _history_sig = sig
@@ -2563,7 +2567,8 @@ def refresh_indicator_history(force=False):
         # Keep all history for BB/NWE/mirror; indicator_history applies the
         # 400-bar limit only to upperpink's step calculation.
         weekly_tbl = indicator_history.table(
-            weekly_base, min(days, len(weekly_base)), weekly_params, weekly_confirmed
+            weekly_base, min(days, len(weekly_base)), weekly_params, weekly_confirmed,
+            tv_weekly.step_by_week(key, weekly_confirmed)
         )
 
     def _excel_rows(table):

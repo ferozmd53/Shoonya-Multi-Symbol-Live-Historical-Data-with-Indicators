@@ -51,6 +51,11 @@ def to_weekly(df):
     return weekly.reset_index()
 
 
+def _monday(ts):
+    ts = pd.Timestamp(ts).normalize()
+    return ts - pd.Timedelta(days=ts.weekday())
+
+
 def _f(df, col):
     return df[col].astype(float).values
 
@@ -68,7 +73,7 @@ def _bb(df, p):
     return (sma + p["bb_std"] * sd).values, (sma - p["bb_std"] * sd).values
 
 
-def snapshot(df, p, last_bar_confirmed=True):
+def snapshot(df, p, last_bar_confirmed=True, pink_override=None):
     """Indicator values on the last bar of df (dict of raw floats / bools)."""
     df = df.reset_index(drop=True)
     bb_u, bb_l = _bb(df, p)
@@ -83,6 +88,10 @@ def snapshot(df, p, last_bar_confirmed=True):
     pink = pink_mirror.step_last(
         _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
         p["step_width"], p["atr_len"], p["atr_hi"], p["start_bar"], last_bar_confirmed)
+    if pink_override:   # weekly: TradingView's own candles (tv_weekly) when available
+        _ov = pink_override.get(_monday(df["datetime"].iloc[-1]))
+        if _ov is not None:
+            pink = _ov
     mirror = pink_mirror.mirror_last(_f(df, p["pm_sma"]), float(df[p["pm_ref"]].iloc[-1]),
                                      p["pm_len"], p["pm_mult"])
     last = df.iloc[-1]
@@ -95,7 +104,7 @@ def snapshot(df, p, last_bar_confirmed=True):
     }
 
 
-def table(df, days, p, last_bar_confirmed=True):
+def table(df, days, p, last_bar_confirmed=True, pink_override=None):
     """DataFrame (newest first) with the indicator values of the last `days` bars."""
     df = df.reset_index(drop=True)
     n = len(df)
@@ -114,6 +123,11 @@ def table(df, days, p, last_bar_confirmed=True):
             _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
             p["step_width"], p["atr_len"], p["atr_hi"], p["start_bar"], last_bar_confirmed)
         pink[pm_offset:] = st
+    if pink_override:   # weekly: TradingView's own candles (tv_weekly) when available
+        for _i in range(n):
+            _ov = pink_override.get(_monday(df["datetime"].iloc[_i]))
+            if _ov is not None:
+                pink[_i] = _ov
 
     src, close = _f(df, p["nwe_src"]), _f(df, "close")
     # Show whether upperpink has enough bars for both its seed and ATR-highest window.
