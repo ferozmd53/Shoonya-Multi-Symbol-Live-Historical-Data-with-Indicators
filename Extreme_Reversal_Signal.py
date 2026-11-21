@@ -582,7 +582,7 @@ def _download_daily_rows(symbol, from_date, to_dt):
     while block_start <= final_date:
         # Align blocks to five-year calendar boundaries: 2010-2014, 2015-2019, etc.
         next_boundary_year = ((block_start.year // 5) + 1) * 5
-        block_end = min(date(next_boundary_year, 1, 1) - timedelta(days=1), final_date)
+        block_end = min(datetime(next_boundary_year, 1, 1).date() - timedelta(days=1), final_date)
         print(
             f"[HISTORY] {symbol} block {block_start:%Y-%m-%d} to "
             f"{block_end:%Y-%m-%d}"
