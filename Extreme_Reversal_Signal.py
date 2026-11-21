@@ -667,6 +667,22 @@ def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
             daily = daily.sort_values('datetime').reset_index(drop=True)
 
         weekly = indicator_history.to_weekly(daily)
+
+        # Weekly Historical must contain completed weeks only. Exclude the
+        # entire week containing the reference date (current week for live
+        # operation, or the selected AS_OF_DATE when one is configured).
+        # Keep the full earlier history so weekly indicators retain warm-up.
+        if live_bar is None:
+            reference_date = (
+                pd.Timestamp(as_of).date()
+                if as_of is not None
+                else datetime.now().date()
+            )
+            current_week_start = pd.Timestamp(
+                reference_date - timedelta(days=reference_date.weekday())
+            )
+            weekly = weekly[weekly['datetime'] < current_week_start].copy()
+
         if Config.WEEKLY_FIRST_BAR_DATE:
             weekly = weekly[weekly['datetime'] >= pd.Timestamp(Config.WEEKLY_FIRST_BAR_DATE)]
         weekly = weekly.reset_index(drop=True)
