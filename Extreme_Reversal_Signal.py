@@ -646,9 +646,11 @@ def _weekly_upperpink(base, as_of=None, live_bar=None, last_bar_confirmed=None):
 
         if live_bar is not None:
             ltp = safe_float(live_bar.get('ltp', 0))
-            if ltp <= 0:
-                return ''
+            tick_time = live_bar.get('timestamp')
             today = pd.Timestamp(datetime.now().date())
+            # Never treat a stale prior-session tick as a new candle on a holiday/weekend.
+            if ltp <= 0 or tick_time is None or pd.Timestamp(tick_time).date() != today.date():
+                return ''
             current = _current_bar(live_bar, ltp)
             live_row = {
                 'datetime': today,
