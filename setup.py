@@ -11,12 +11,12 @@ setup(
     install_requires=[
         "NorenRestApiPy>=0.0.22",
         "xlwings>=0.30.0",
-        "numpy>=1.24.0",
+        "numpy>=2.0.0",
         "pandas>=2.0.0",
         "openpyxl>=3.1.0",
         "TA-Lib>=0.6.5",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     include_package_data=True,
     package_data={'': ['*.xlsx']},
 )
