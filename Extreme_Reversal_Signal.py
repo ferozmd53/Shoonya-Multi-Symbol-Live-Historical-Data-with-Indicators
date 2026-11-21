@@ -342,6 +342,7 @@ def get_order_headers():
 
 import nadaraya_watson
 import pink_mirror
+import weekly_upperpink
 import candle_cache
 import indicator_settings
 import indicator_history
@@ -653,7 +654,7 @@ def _row_from_snapshot(snap):
     }
 
 
-def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
+def _weekly_snapshot(base, symbol, as_of=None, live_bar=None, last_bar_confirmed=None):
     """Build a complete weekly OHLCV + indicator snapshot from daily candles."""
     try:
         if base is None or base.empty:
@@ -723,14 +724,24 @@ def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
         # Weekly calculations must warm up from the weekly start date, not the daily start date.
         params = indicator_params()
         params['first_bar_date'] = Config.WEEKLY_FIRST_BAR_DATE
-        return indicator_history.snapshot(weekly, params, last_bar_confirmed)
+        weekly_atr = weekly_upperpink.atr_values(
+            Config.CANDLE_DB_PATH,
+            symbol,
+            weekly,
+            period=params['atr_len'],
+            persist_last=(live_bar is None),
+            persist=(as_of is None),
+        )
+        return indicator_history.snapshot(
+            weekly, params, last_bar_confirmed, weekly_atr_values=weekly_atr
+        )
     except Exception as exc:
         print(f"⚠️ Weekly calculation: {exc}")
         return None
 
 
 def _weekly_history_row(symbol, base, as_of=None):
-    snap = _weekly_snapshot(base, as_of=as_of)
+    snap = _weekly_snapshot(base, symbol=symbol, as_of=as_of)
     if not snap:
         return [''] * 13
     return [
@@ -744,7 +755,7 @@ def _weekly_history_row(symbol, base, as_of=None):
 def _weekly_live_row(symbol, base, live_bar):
     # The live weekly candle is provisional: allow upperpink to react to its current price.
     # Weekly Historical remains confirmed and is calculated independently above.
-    snap = _weekly_snapshot(base, live_bar=live_bar, last_bar_confirmed=True)
+    snap = _weekly_snapshot(base, symbol=symbol, live_bar=live_bar, last_bar_confirmed=True)
     if not snap:
         return [''] * 14
     tick_time = live_bar.get('timestamp')
@@ -2300,8 +2311,17 @@ def refresh_indicator_history(force=False):
     if not weekly_base.empty:
         latest_week_start = pd.Timestamp(weekly_base['datetime'].iloc[-1]).date()
         weekly_confirmed = datetime.now().date() > latest_week_start + timedelta(days=4)
+        weekly_atr_values = weekly_upperpink.atr_values(
+            Config.CANDLE_DB_PATH,
+            key,
+            weekly_base,
+            period=weekly_params['atr_len'],
+            persist_last=weekly_confirmed,
+            persist=True,
+        )
         weekly_tbl = indicator_history.table(
-            weekly_base, min(days, len(weekly_base)), weekly_params, weekly_confirmed
+            weekly_base, min(days, len(weekly_base)), weekly_params, weekly_confirmed,
+            weekly_atr_values=weekly_atr_values,
         )
 
     def _excel_rows(table):
