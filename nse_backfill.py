@@ -318,7 +318,7 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
         # minimum 299-week ATR warm-up is already available. Stopping at the
         # warm-up threshold makes Wilder RMA depend on how much history happened
         # to be downloaded for a particular symbol.
-        while earliest_known > start_limit:
+        while earliest_known > start_limit + timedelta(days=7):
             end_date = earliest_known - timedelta(days=1)
             start_date = max(start_limit, end_date - timedelta(days=419))
             if start_date > end_date:
@@ -383,7 +383,7 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
                 f"{required_weeks} weekly candles available; ATR warm-up is incomplete"
             )
 
-        if earliest_known <= start_limit:
+        if earliest_known <= start_limit + timedelta(days=7):
             print(
                 f"[NSE BACKFILL] {nse_symbol}: fixed history anchor reached "
                 f"({start_limit}); earliest candle {earliest_known}"
