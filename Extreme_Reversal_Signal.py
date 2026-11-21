@@ -374,6 +374,8 @@ class Config:
     # must be FIXED (otherwise the seed drifts every day). Set this to the date of
     # the first bar your TradingView chart loaded to line the step up with it.
     PM_FIRST_BAR_DATE = '2023-01-02'
+    # Weekly step indicator needs enough weekly bars for ATR(200) + highest(100).
+    WEEKLY_FIRST_BAR_DATE = '2020-01-06'
     # SQLite cache of the DAILY candles (candle_cache.py): the full history is downloaded once,
     # later runs only fetch the last few days (or nothing when the cache is already up to date).
     USE_CANDLE_CACHE = True
@@ -588,7 +590,11 @@ def history_days():
     if Config.PM_FIRST_BAR_DATE:
         first = datetime.strptime(Config.PM_FIRST_BAR_DATE, '%Y-%m-%d').date()
         pm = (datetime.now().date() - first).days + 30
-    return max(Config.LOAD_DAYS, nwe, pm)
+    weekly = 0
+    if Config.WEEKLY_FIRST_BAR_DATE:
+        first_week = datetime.strptime(Config.WEEKLY_FIRST_BAR_DATE, '%Y-%m-%d').date()
+        weekly = (datetime.now().date() - first_week).days + 30
+    return max(Config.LOAD_DAYS, nwe, pm, weekly)
 
 
 def indicator_params():
@@ -619,6 +625,74 @@ def _row_from_snapshot(snap):
         'nwe_buy': snap['nwe_buy'], 'nwe_sell': snap['nwe_sell'],
         'pink': _rnd(snap['pink']), 'mirror': _rnd(snap['mirror']),
     }
+
+
+def _weekly_upperpink(base, as_of=None, live_bar=None, last_bar_confirmed=None):
+    """Calculate weekly upperpink independently from daily candles.
+
+    AW uses historical daily candles (and AS_OF_DATE when selected).
+    BJ overlays today's live OHLCV and leaves the current weekly candle unconfirmed,
+    matching Pine's barstate.isconfirmed step-line behavior.
+    """
+    try:
+        if base is None or base.empty:
+            return ''
+        daily = base[['datetime', 'open', 'high', 'low', 'close', 'volume']].copy()
+        daily['datetime'] = pd.to_datetime(daily['datetime'])
+        if as_of is not None:
+            daily = daily[daily['datetime'] <= pd.Timestamp(as_of)].copy()
+        if daily.empty:
+            return ''
+
+        if live_bar is not None:
+            ltp = safe_float(live_bar.get('ltp', 0))
+            if ltp <= 0:
+                return ''
+            today = pd.Timestamp(datetime.now().date())
+            current = _current_bar(live_bar, ltp)
+            live_row = {
+                'datetime': today,
+                'open': safe_float(current.get('open'), ltp),
+                'high': safe_float(current.get('high'), ltp),
+                'low': safe_float(current.get('low'), ltp),
+                'close': ltp,
+                'volume': safe_float(live_bar.get('volume', 0)),
+            }
+            today_mask = daily['datetime'].dt.date == today.date()
+            if today_mask.any():
+                idx = daily.index[today_mask][-1]
+                for key, value in live_row.items():
+                    daily.loc[idx, key] = value
+            else:
+                daily = pd.concat([daily, pd.DataFrame([live_row])], ignore_index=True)
+            daily = daily.sort_values('datetime').reset_index(drop=True)
+
+        weekly = indicator_history.to_weekly(daily)
+        if Config.WEEKLY_FIRST_BAR_DATE:
+            weekly = weekly[weekly['datetime'] >= pd.Timestamp(Config.WEEKLY_FIRST_BAR_DATE)]
+        weekly = weekly.reset_index(drop=True)
+        if len(weekly) <= Config.PM_START_BAR:
+            return ''
+
+        if last_bar_confirmed is None:
+            week_start = weekly['datetime'].iloc[-1].date()
+            last_bar_confirmed = datetime.now().date() > week_start + timedelta(days=4)
+
+        value = pink_mirror.step_last(
+            weekly['high'].astype(float).values,
+            weekly['low'].astype(float).values,
+            weekly['close'].astype(float).values,
+            weekly[Config.PM_STEP_SRC].astype(float).values,
+            Config.PM_STEP_WIDTH,
+            Config.PM_ATR_LEN,
+            Config.PM_ATR_HI,
+            Config.PM_START_BAR,
+            last_bar_confirmed,
+        )
+        return _rnd(value)
+    except Exception as exc:
+        print(f"⚠️ Weekly upperpink calculation: {exc}")
+        return ''
 
 
 def _download_df(symbol):
@@ -1670,7 +1744,7 @@ def update_excel_bulk():
 
         ws = excel_name.sheets['symbols']
         symbols_data = ws.range(f"{Config.SYMBOL_COL}2:{Config.SYMBOL_COL}200").value or []
-        live_rows, hist_rows = [], []
+        live_rows, hist_rows, weekly_history_rows, weekly_live_rows = [], [], [], []
 
         for symbol_cell in symbols_data:
             if not symbol_cell:
@@ -1678,6 +1752,8 @@ def update_excel_bulk():
                     live_rows.append([''] * LIVE_COUNT)
                 if hist_due:
                     hist_rows.append([''] * HIST_COUNT)
+                    weekly_history_rows.append([''])
+                    weekly_live_rows.append([''])
                 continue
 
             try:
@@ -1687,6 +1763,8 @@ def update_excel_bulk():
                     live_rows.append([''] * LIVE_COUNT)
                 if hist_due:
                     hist_rows.append([''] * HIST_COUNT)
+                    weekly_history_rows.append([''])
+                    weekly_live_rows.append([''])
                 continue
 
             token_key = symbol_tokens.get(symbol)
@@ -1725,6 +1803,17 @@ def update_excel_bulk():
                     yesterday.get('bb_upper', ''), yesterday.get('bb_lower', ''),
                     yesterday.get('pink', ''), yesterday.get('mirror', '')
                 ])
+                # AW: historical weekly calculation from the daily history only.
+                weekly_history_rows.append([
+                    _weekly_upperpink(hist.get('base') if hist else None,
+                                      as_of=Config.AS_OF_DATE)
+                ])
+                # BJ: independent current-week calculation with today's live OHLCV overlay.
+                weekly_live_rows.append([
+                    _weekly_upperpink(hist.get('base') if hist else None,
+                                      live_bar=data, last_bar_confirmed=False)
+                    if hist and data else ''
+                ])
 
         if symbols_data:
             last_row = 1 + len(symbols_data)
@@ -1734,6 +1823,9 @@ def update_excel_bulk():
                 last_indicator_excel_update = now
             if hist_due and hist_rows:
                 ws.range(f"{Config.HIST_START}2:{HIST_END}{last_row}").value = hist_rows
+                # Fixed user workbook positions; write only these two value columns.
+                ws.range(f"AW2:AW{last_row}").value = weekly_history_rows
+                ws.range(f"BJ2:BJ{last_row}").value = weekly_live_rows
                 last_hist_excel_update = now
 
     except Exception as exc:
@@ -1836,111 +1928,19 @@ def consolidate_shared_order_type(ws):
 # ============================================
 
 def migrate_spacer_columns():
-    """Existing workbook still has the old live BUY/SELL/Signal columns N:P?
-    (old layout: Q1 = 'Last Update', R1 = 'Quantity').  Delete N:P in Excel so the
-    order panel, history and the user's order inputs shift left together.
-    Returns False if it could not be done (the run is then stopped, never misaligned)."""
+    """Compatibility no-op: never insert, delete, or shift the user's workbook columns."""
+    print("🔒 Workbook column migration disabled; existing column positions are preserved.")
+    return True
+def setup_excel_headers():
+    """Do not rewrite headers or clear cells: the user's A:BL layout is authoritative."""
     try:
         ws = excel_name.sheets['symbols']
-        q1 = str(ws.range("Q1").value or "").strip().upper()
-        r1 = str(ws.range("R1").value or "").strip().upper()
-        if q1 == "LAST UPDATE" and r1 == "QUANTITY":
-            print("🔧 Removing old live columns N:P from the 'symbols' sheet (everything shifts left)...")
-            ws.range("N:P").api.Delete()
-            print("✅ Columns N:P removed; layout is now contiguous.")
-        # Previous layout (live B:N, 'Last Update' in N, orders from O): make room for the
-        # two new live columns upperpink / mirrorUpperBand by inserting N:O (orders move right).
-        n1 = str(ws.range("N1").value or "").strip().upper()
-        o1 = str(ws.range("O1").value or "").strip().upper()
-        if n1 == "LAST UPDATE" and o1 == "QUANTITY":
-            print("🔧 Inserting 2 live columns (N:O) for upperpink / mirrorUpperBand...")
-            ws.range("N:O").api.Insert()
-            print("✅ Columns inserted; orders and history moved right together.")
-        # 'SMA Stoch' and 'BB Middle' were removed from the live AND historical blocks:
-        # delete those columns (found by their row-1 header) right-to-left so everything shifts left.
-        row1 = ws.range("A1:BZ1").value or []
-        drop = [i + 1 for i, h in enumerate(row1)
-                if str(h or "").strip().upper() in ("SMA STOCH", "BB MIDDLE")]
-        if drop:
-            names = [get_column_letter(c) for c in sorted(drop)]
-            print(f"🔧 Removing SMA Stoch / BB Middle columns ({', '.join(names)}) - everything shifts left...")
-            for col_num in sorted(drop, reverse=True):
-                letter = get_column_letter(col_num)
-                ws.range(f"{letter}:{letter}").api.Delete()
-            print("✅ Columns removed; layout is contiguous.")
-        try:
-            excel_name.save()
-        except Exception:
-            pass
+        if str(ws.range("A1").value or "").strip().upper() != "SYMBOL":
+            print("⚠️ symbols!A1 is not SYMBOL; leaving every existing header untouched.")
+        print("🔒 Existing symbols-sheet headers and column positions preserved (no migration).")
         return True
     except Exception as exc:
-        print(f"❌ Could not adjust the sheet columns automatically: {exc}")
-        print("   Fix the 'symbols' sheet by hand (delete the SMA Stoch and BB Middle columns, in the live and")
-        print("   historical blocks, and make the live block B:N), then run again.")
-        return False
-
-
-def setup_excel_headers():
-    try:
-        ws = excel_name.sheets['symbols']
-        migrate_legacy_layout(ws)
-        consolidate_shared_order_type(ws)
-        # U and Z were local DONE flags in the previous version; they are obsolete.
-        ws.range(f"{ORDER_COLS[3]}2:{ORDER_COLS[3]}200").clear_contents()
-        ws.range(f"{ORDER_COLS[8]}2:{ORDER_COLS[8]}200").clear_contents()
-        ws.range("1:1").clear_contents()
-        # Removed historical BUY/SELL/Signal columns (AO:AQ): clear the stale values.
-        _stale = get_column_range(get_column_letter(get_column_number(HIST_END) + 1), 3)
-        ws.range(f"{_stale[0]}2:{_stale[-1]}200").clear_contents()
-        
-        # Build headers in correct order: Symbol, LIVE, ORDERS, HISTORICAL
-        headers = ['Symbol']
-        headers.extend(get_live_headers())
-        headers.extend(get_order_headers())
-        headers.extend(get_hist_headers())
-        
-        # Write headers
-        for col_idx, header in enumerate(headers, start=1):
-            cell = ws.range((1, col_idx))
-            cell.value = header
-            
-            # Color coding based on section
-            if header in ['BUY', 'SELL', 'Signal']:
-                cell.color = (255, 100, 100)
-            elif col_idx > len(get_live_headers()) + 1 and col_idx <= len(get_live_headers()) + len(get_order_headers()) + 1:
-                # Order section
-                cell.color = (0, 100, 0)
-                cell.font.color = (255, 255, 255)
-            elif col_idx > len(get_live_headers()) + len(get_order_headers()) + 1:
-                # Historical section
-                cell.color = (146, 96, 54)
-            else:
-                # Live section
-                cell.color = (54, 96, 146)
-            cell.font.color = (255, 255, 255)
-            cell.font.bold = True
-        
-        # Set column widths
-        # Column widths: give a column its default width ONLY while it is still at Excel's
-        # default width.  Widths you set yourself are never overwritten on the next start.
-        try:
-            default_width = float(ws.api.StandardWidth)
-        except Exception:
-            default_width = 8.43
-        widths = {col: 12 for col in ALL_COLS}
-        widths['A'] = 20
-        widths.update({ORDER_COLS[4]: 34, ORDER_COLS[9]: 34, ORDER_COLS[5]: 20, ORDER_COLS[10]: 20})
-        for col, width in widths.items():
-            try:
-                rng = ws.range(f'{col}:{col}')
-                current = rng.column_width
-                if current is None or abs(float(current) - default_width) < 0.06:
-                    rng.column_width = width
-            except Exception:
-                pass
-
-        return True
-    except Exception:
+        print(f"❌ Could not verify symbols sheet: {exc}")
         return False
 
 # ============================================
