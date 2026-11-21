@@ -902,13 +902,17 @@ def _preload_live(d, hist_data):
     d.pop('_nwe_key', None)
 
 def _current_bar(d, ltp):
-    """Today's forming daily bar from the tick data."""
+    """Today's forming daily bar using accumulated ticks and exchange day high/low."""
     today_open = safe_float(d.get('open', 0)) or ltp
-    day_low = safe_float(d.get('day_low', 0))             # exchange day low from the tick, if sent
+    day_high = safe_float(d.get('day_high', 0))
+    day_low = safe_float(d.get('day_low', 0))
+    high_now = safe_float(d.get('high', 0)) or ltp
     low_now = safe_float(d.get('low', 0)) or ltp
+    if day_high > 0:
+        high_now = max(high_now, day_high)
     if day_low > 0:
         low_now = min(low_now, day_low)
-    return {'open': today_open, 'high': safe_float(d.get('high', 0)) or ltp, 'low': low_now, 'close': ltp}
+    return {'open': today_open, 'high': high_now, 'low': low_now, 'close': ltp}
 
 
 _HIST_KEY = {'open': 'all_opens', 'high': 'all_highs', 'low': 'all_lows', 'close': 'all_closes'}
@@ -1643,7 +1647,11 @@ def on_ticks(tick):
             d['volume'] = volume
             d['timestamp'] = datetime.now()
             d['close'] = ltp
+            # Shoonya touchline 'h'/'l' fields are the exchange day high/low.
+            _tick_high = safe_float(tick.get('h', 0))
             _tick_low = safe_float(tick.get('l', 0))
+            if _tick_high > 0:
+                d['day_high'] = _tick_high
             if _tick_low > 0:
                 d['day_low'] = _tick_low
             
