@@ -302,6 +302,13 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
         combined = pd.concat([cached, shoonya], ignore_index=True)
         combined = combined.sort_values("datetime").drop_duplicates("datetime", keep="last")
         have_weeks = _weekly_count(combined, start_limit)
+        # Seed the backfill cursor from the oldest candle already available.
+        # Without this initialization, the fixed-anchor loop raises
+        # UnboundLocalError before it can request any NSE history.
+        earliest_known = min(
+            shoonya_first,
+            cached["datetime"].min().date() if not cached.empty else shoonya_first
+        )
 
         if have_weeks >= required_weeks:
             print(
