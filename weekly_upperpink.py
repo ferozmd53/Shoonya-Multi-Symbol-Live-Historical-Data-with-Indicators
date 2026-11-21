@@ -12,9 +12,11 @@ A provisional current week is calculated in memory and is never saved as a
 completed ATR row.
 """
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import talib
 
 
@@ -39,6 +41,26 @@ def _connect(db_path):
     con.execute("PRAGMA busy_timeout=30000")
     con.execute(_SCHEMA)
     return con
+
+
+
+def _database(db_path):
+    """Close the SQLite connection as well as committing its transaction."""
+    class DatabaseContext:
+        def __enter__(self):
+            self.connection = _connect(db_path)
+            return self.connection
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            try:
+                if exc_type is None:
+                    self.connection.commit()
+                else:
+                    self.connection.rollback()
+            finally:
+                self.connection.close()
+            return False
+    return DatabaseContext()
 
 
 def _number(value):
@@ -100,7 +122,7 @@ def atr_values(db_path, symbol, weekly_df, period=200,
         return np.asarray([], dtype=float)
 
     frame = weekly_df[["datetime", "open", "high", "low", "close"]].copy()
-    frame["datetime"] = __import__("pandas").to_datetime(frame["datetime"])
+    frame["datetime"] = pd.to_datetime(frame["datetime"])
     frame = frame.sort_values("datetime").drop_duplicates("datetime").reset_index(drop=True)
     dates = [value.strftime("%Y-%m-%d") for value in frame["datetime"]]
     opens = frame["open"].astype(float).to_numpy()
@@ -115,7 +137,7 @@ def atr_values(db_path, symbol, weekly_df, period=200,
         return _talib_atr(highs, lows, closes, period)
 
     symbol = str(symbol or "UNKNOWN").strip().upper()
-    with _connect(db_path) as con:
+    with _database(db_path) as con:
         rows = con.execute(
             "SELECT week, open, high, low, close, atr "
             "FROM weekly_atr_cache WHERE symbol=? ORDER BY week",
@@ -183,6 +205,11 @@ def atr_values(db_path, symbol, weekly_df, period=200,
                     "(symbol, week, open, high, low, close, atr) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     payload,
+                )
+                action = "initialized" if first_rebuilt == 0 else "updated"
+                print(
+                    f"Weekly TA-Lib ATR cache {action} for {symbol}: "
+                    f"{len(payload)} completed weekly candles"
                 )
 
         # Provisional current week: calculate in memory only, never persist it.
