@@ -1780,8 +1780,8 @@ def update_excel_bulk():
                     live_rows.append([''] * LIVE_COUNT)
                 if hist_due:
                     hist_rows.append([''] * HIST_COUNT)
-                    weekly_history_rows.append([''])
-                    weekly_live_rows.append([''])
+                    weekly_history_rows.append([''] * 13)
+                    weekly_live_rows.append([''] * 14)
                 continue
 
             token_key = symbol_tokens.get(symbol)
@@ -1947,32 +1947,67 @@ def migrate_spacer_columns():
     print("🔒 Workbook column migration disabled; existing column positions are preserved.")
     return True
 def setup_excel_headers():
-    """Fill missing weekly header cells only; preserve all existing values and positions."""
+    """Restore blank headers A:BL and apply separate section colours without moving data."""
     try:
         ws = excel_name.sheets['symbols']
-        if str(ws.range("A1").value or "").strip().upper() != "SYMBOL":
-            print("⚠️ symbols!A1 is not SYMBOL; leaving every existing header untouched.")
-        weekly_headers = {
+
+        # Exact existing workbook layout: Symbol | Live | Orders | Daily | Weekly history | Weekly live.
+        headers = {
+            "A": "SYMBOL",
+            "B": "LTP", "C": "Open", "D": "High", "E": "Low", "F": "Close",
+            "G": "Volume", "H": "NADARYA BUY", "I": "NADARYA SELL",
+            "J": "BB Upper", "K": "BB Lower", "L": "upperpink",
+            "M": "mirrorUpperBand", "N": "Last Update",
+            "O": "Quantity", "P": "BUY", "Q": "ORDER TYPE (CNC/MIS)",
+            "R": "BUY PRC", "S": "BUY Broker Status", "T": "BUY Order No",
+            "U": "SELL", "V": "", "W": "SELL PRC",
+            "X": "SELL Broker Status", "Y": "SELL Order No",
+            "Z": "Date", "AA": "Open", "AB": "High", "AC": "Low",
+            "AD": "Close", "AE": "Volume", "AF": "NADARYA BUY",
+            "AG": "NADARYA SELL", "AH": "BB Upper", "AI": "BB Lower",
+            "AJ": "upperpink", "AK": "mirrorUpperBand",
             "AL": "SYMBOL", "AM": "Week (Mon)", "AN": "Open", "AO": "High",
             "AP": "Low", "AQ": "Close", "AR": "Volume", "AS": "NADARYA BUY",
             "AT": "NADARYA SELL", "AU": "BB Upper", "AV": "BB Lower",
             "AW": "upperpink", "AX": "mirrorUpperBand",
-            "AY": "SYMBOLS", "AZ": "Week (Mon)", "BA": "LTP", "BB": "Open",
+            "AY": "SYMBOL", "AZ": "Week (Mon)", "BA": "LTP", "BB": "Open",
             "BC": "High", "BD": "Low", "BE": "Volume", "BF": "NADARYA BUY",
             "BG": "NADARYA SELL", "BH": "BB Upper", "BI": "BB Lower",
             "BJ": "upperpink", "BK": "mirrorUpperBand", "BL": "Last Update"
         }
+
+        # Only fill blank header cells. Never overwrite user labels or any data rows.
         filled = 0
-        for col, header in weekly_headers.items():
+        for col, header in headers.items():
             cell = ws.range(f"{col}1")
             if cell.value is None or str(cell.value).strip() == "":
-                cell.value = header
-                filled += 1
-        print(f"🟣 Weekly headers AL:AX / AY:BL checked; filled {filled} blank cells only.")
-        print("🔒 Existing headers, data, and column positions preserved (no migration).")
+                if header:
+                    cell.value = header
+                    filled += 1
+
+        # Distinct header colours for each data section.
+        sections = [
+            ("A1:A1", (217, 217, 217)),       # Symbol
+            ("B1:N1", (189, 215, 238)),       # Live
+            ("O1:Y1", (252, 228, 214)),       # Orders
+            ("Z1:AK1", (226, 239, 218)),      # Daily history
+            ("AL1:AX1", (217, 210, 233)),     # Weekly history
+            ("AY1:BL1", (244, 204, 204)),     # Weekly live
+        ]
+        for address, fill in sections:
+            section = ws.range(address)
+            section.color = fill
+            section.api.Font.Bold = True
+            section.api.HorizontalAlignment = -4108
+            section.api.VerticalAlignment = -4108
+            section.api.WrapText = True
+
+        print(f"🧾 Headers A:BL checked; filled {filled} blank header cells.")
+        print("🎨 Header colours applied: Live=Blue, Orders=Orange, Daily=Green, Weekly History=Purple, Weekly Live=Pink.")
+        print("🔒 Existing nonblank headers, data rows, and column positions preserved (no migration).")
         return True
     except Exception as exc:
-        print(f"❌ Could not verify symbols sheet: {exc}")
+        print(f"❌ Could not restore headers/colours: {exc}")
         return False
 
 # ============================================
