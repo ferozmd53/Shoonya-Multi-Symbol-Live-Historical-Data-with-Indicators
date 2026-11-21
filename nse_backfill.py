@@ -296,7 +296,10 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
             return pd.DataFrame()
 
         shoonya_first = shoonya["datetime"].min().date()
-        required_weeks = max(int(start_bar) + 1, int(atr_len) + int(atr_highest) - 1)
+        # The TradingView reference is evaluated with at least 400 weekly candles.
+        # Keep this as a weekly-bar target; do not download to the 2010 anchor once
+        # the required warm-up history is already available.
+        required_weeks = max(400, int(start_bar) + 1, int(atr_len) + int(atr_highest) - 1)
         cached = _load_cached(db_path, nse_symbol)
         cached = cached[cached["datetime"] < pd.Timestamp(shoonya_first)].copy()
         combined = pd.concat([cached, shoonya], ignore_index=True)
@@ -312,20 +315,19 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
 
         if have_weeks >= required_weeks:
             print(
-                f"[NSE BACKFILL] {nse_symbol}: minimum ATR warm-up is ready "
-                f"({have_weeks}/{required_weeks}); checking the full fixed history anchor"
+                f"[NSE BACKFILL] {nse_symbol}: weekly history already ready "
+                f"({have_weeks}/{required_weeks}); no NSE download needed"
             )
 
-        print(
-            f"[NSE BACKFILL] {nse_symbol}: need older candles; "
-            f"weekly ATR warm-up {have_weeks}/{required_weeks}"
-        )
+        else:
+            print(
+                f"[NSE BACKFILL] {nse_symbol}: fetching only the missing older candles; "
+                f"weekly history {have_weeks}/{required_weeks}"
+            )
 
-        # Always extend to the fixed calculation anchor, even when the
-        # minimum 299-week ATR warm-up is already available. Stopping at the
-        # warm-up threshold makes Wilder RMA depend on how much history happened
-        # to be downloaded for a particular symbol.
-        while earliest_known > start_limit + timedelta(days=7):
+        # Fetch backwards only until the 400-week TradingView history target is met.
+        # This runs in a background worker, never in the live-startup path.
+        while have_weeks < required_weeks and earliest_known > start_limit + timedelta(days=7):
             end_date = earliest_known - timedelta(days=1)
             start_date = max(start_limit, end_date - timedelta(days=419))
             if start_date > end_date:
