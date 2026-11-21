@@ -270,7 +270,8 @@ def _weekly_count(frame, weekly_start_date):
 
 
 def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
-                      atr_len=200, atr_highest=100, start_bar=200):
+                      atr_len=200, atr_highest=100, start_bar=200,
+                      full_history=False):
     """Return ONLY older NSE candles needed to make weekly upperpink ATR ready.
 
     The TradingView reference uses at least 400 weekly candles. Existing NSE
@@ -298,6 +299,11 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
         # Keep this as a weekly-bar target; do not download to the 2010 anchor once
         # the required warm-up history is already available.
         required_weeks = max(400, int(start_bar) + 1, int(atr_len) + int(atr_highest) - 1)
+        if full_history:
+            # Stateful step line: needs every weekly bar from the anchor date so the
+            # seed bar (bar_index == start_bar) lands where TradingView's does.
+            required_weeks = max(required_weeks,
+                                 int((date.today() - start_limit).days // 7) + 1)
         cached = _load_cached(db_path, nse_symbol)
         cached = cached[cached["datetime"] < pd.Timestamp(shoonya_first)].copy()
         combined = pd.concat([cached, shoonya], ignore_index=True)

@@ -419,7 +419,14 @@ class Config:
     # Daily calculations retain their existing history start; weekly ATR uses all
     # available history from 2010 so Wilder ATR has the longest practical warm-up.
     DAILY_CALC_FIRST_BAR_DATE = '2020-01-06'
-    WEEKLY_FIRST_BAR_DATE = '2010-01-01'
+    # Weekly upperpink is a STATEFUL step line: its value depends on where it is seeded.
+    # TradingView seeds it at bar_index == 500 counted from the FIRST weekly bar of the
+    # whole chart history, so the weekly calc must use the full history (no sliding
+    # window) and the same seed bar. WEEKLY_FIRST_BAR_DATE is only an anchor: if the
+    # symbol listed later, its real first bar is used (like TradingView).
+    WEEKLY_FIRST_BAR_DATE = '2000-01-01'
+    WEEKLY_START_BAR = 500            # weekly seed bar (matches the TradingView-matching script)
+    WEEKLY_FULL_HISTORY = True        # NSE backfill goes back to WEEKLY_FIRST_BAR_DATE
     # SQLite cache of the DAILY candles (candle_cache.py): the full history is downloaded once,
     # later runs only fetch the last few days (or nothing when the cache is already up to date).
     USE_CANDLE_CACHE = True
@@ -822,12 +829,19 @@ def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
             current_week_start = pd.Timestamp(
                 reference_date - timedelta(days=reference_date.weekday())
             )
-            weekly = weekly[weekly['datetime'] < current_week_start].copy()
+            # Drop the current week only while it is still open (NSE weekly closes
+            # Friday 15:30 IST). After that (Fri evening / weekend) it is a completed
+            # TradingView candle and must be kept.
+            current_week_close = current_week_start + timedelta(days=4, hours=15, minutes=30)
+            week_is_open = (as_of is None and datetime.now() < current_week_close) \
+                or (as_of is not None and pd.Timestamp(as_of) < current_week_close)
+            if week_is_open:
+                weekly = weekly[weekly['datetime'] < current_week_start].copy()
 
         if Config.WEEKLY_FIRST_BAR_DATE:
             weekly = weekly[weekly['datetime'] >= pd.Timestamp(Config.WEEKLY_FIRST_BAR_DATE)]
         weekly = weekly.reset_index(drop=True)
-        if len(weekly) <= Config.PM_START_BAR:
+        if len(weekly) <= Config.WEEKLY_START_BAR:
             return None
 
         if last_bar_confirmed is None:
@@ -845,9 +859,11 @@ def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
         # Weekly calculations must warm up from the weekly start date, not the daily start date.
         params = indicator_params()
         params['first_bar_date'] = Config.WEEKLY_FIRST_BAR_DATE
-        # TradingView reference seeds weekly upperpink at bar_index 200
-        # within the latest 400 weekly candles. Other indicators use all history.
-        params['step_lookback'] = 400
+        # TradingView seeds weekly upperpink at bar_index 500 of the FULL weekly
+        # history (fixed seed). No sliding window: a tail() window moves the seed
+        # every week and the step line drifts away from TradingView.
+        params['start_bar'] = Config.WEEKLY_START_BAR
+        params['step_lookback'] = 0
         return indicator_history.snapshot(weekly, params, last_bar_confirmed)
     except Exception as exc:
         print(f"⚠️ Weekly calculation: {exc}")
@@ -1087,7 +1103,8 @@ def _background_nse_backfill(symbol_key, trading_symbol, hist_data):
         extra = nse_backfill.get_extra_history(
             trading_symbol, base, Config.NSE_BACKFILL_DB_PATH,
             Config.WEEKLY_FIRST_BAR_DATE, Config.PM_ATR_LEN,
-            Config.PM_ATR_HI, Config.PM_START_BAR
+            Config.PM_ATR_HI, Config.WEEKLY_START_BAR,
+            full_history=Config.WEEKLY_FULL_HISTORY
         )
         if extra is None or extra.empty:
             print(f"[NSE BACKFILL] {trading_symbol}: no additional cached/downloaded candles")
@@ -2522,7 +2539,8 @@ def refresh_indicator_history(force=False):
     weekly_base = indicator_history.to_weekly(base)
     weekly_params = dict(params)
     weekly_params['first_bar_date'] = Config.WEEKLY_FIRST_BAR_DATE
-    weekly_params['step_lookback'] = 400
+    weekly_params['start_bar'] = Config.WEEKLY_START_BAR
+    weekly_params['step_lookback'] = 0     # fixed seed from the first weekly bar
     if Config.WEEKLY_FIRST_BAR_DATE:
         weekly_base = weekly_base[
             weekly_base['datetime'] >= pd.Timestamp(Config.WEEKLY_FIRST_BAR_DATE)
