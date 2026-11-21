@@ -16,6 +16,7 @@ import pandas as pd
 
 import nadaraya_watson
 import pink_mirror
+import weekly_upperpink
 
 TABLE_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume", "BB Upper", "BB Lower",
                  "NADARYA BUY", "NADARYA SELL", "upperpink", "mirrorUpperBand",
@@ -58,16 +59,22 @@ def _bb(df, p):
     return (sma + p["bb_std"] * sd).values, (sma - p["bb_std"] * sd).values
 
 
-def snapshot(df, p, last_bar_confirmed=True):
+def snapshot(df, p, last_bar_confirmed=True, weekly_atr_values=None):
     """Indicator values on the last bar of df (dict of raw floats / bools)."""
     df = df.reset_index(drop=True)
     bb_u, bb_l = _bb(df, p)
     nwe_buy, nwe_sell = nadaraya_watson.nwe_last_bar_signal(
         _f(df, p["nwe_src"]), _f(df, "close"), p["nwe_h"], p["nwe_mult"], p["nwe_repaint"])
     pm = _trim_first_bar(df, p["first_bar_date"])
-    pink = pink_mirror.step_last(
-        _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
-        p["step_width"], p["atr_len"], p["atr_hi"], p["start_bar"], last_bar_confirmed)
+    if weekly_atr_values is None:
+        pink = pink_mirror.step_last(
+            _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
+            p["step_width"], p["atr_len"], p["atr_hi"], p["start_bar"], last_bar_confirmed)
+    else:
+        pink = weekly_upperpink.step_last(
+            _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
+            weekly_atr_values, p["step_width"], p["atr_hi"], p["start_bar"],
+            last_bar_confirmed)
     mirror = pink_mirror.mirror_last(_f(df, p["pm_sma"]), float(df[p["pm_ref"]].iloc[-1]),
                                      p["pm_len"], p["pm_mult"])
     last = df.iloc[-1]
@@ -80,7 +87,7 @@ def snapshot(df, p, last_bar_confirmed=True):
     }
 
 
-def table(df, days, p, last_bar_confirmed=True):
+def table(df, days, p, last_bar_confirmed=True, weekly_atr_values=None):
     """DataFrame (newest first) with the indicator values of the last `days` bars."""
     df = df.reset_index(drop=True)
     n = len(df)
@@ -91,9 +98,15 @@ def table(df, days, p, last_bar_confirmed=True):
     pm = _trim_first_bar(df, p["first_bar_date"])
     pink = np.full(n, np.nan)
     if len(pm):
-        st = pink_mirror.step_series(
-            _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
-            p["step_width"], p["atr_len"], p["atr_hi"], p["start_bar"], last_bar_confirmed)
+        if weekly_atr_values is None:
+            st = pink_mirror.step_series(
+                _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
+                p["step_width"], p["atr_len"], p["atr_hi"], p["start_bar"], last_bar_confirmed)
+        else:
+            st = weekly_upperpink.step_series(
+                _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
+                weekly_atr_values, p["step_width"], p["atr_hi"], p["start_bar"],
+                last_bar_confirmed)
         pink[n - len(pm):] = st
 
     src, close = _f(df, p["nwe_src"]), _f(df, "close")
