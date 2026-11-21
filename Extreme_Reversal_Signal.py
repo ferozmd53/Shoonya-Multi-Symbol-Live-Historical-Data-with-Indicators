@@ -341,7 +341,38 @@ def get_order_headers():
     ]
 
 import nadaraya_watson
-import pink_mirror
+
+# Always load the indicator module shipped beside this file. This prevents a
+# different/older pink_mirror.py elsewhere on sys.path from breaking history.
+import importlib.util as _importlib_util
+_pink_mirror_path = Path(__file__).resolve().with_name("pink_mirror.py")
+if _pink_mirror_path.is_file():
+    _pink_spec = _importlib_util.spec_from_file_location(
+        "pink_mirror", str(_pink_mirror_path)
+    )
+    if _pink_spec is None or _pink_spec.loader is None:
+        raise ImportError(f"Cannot load bundled pink_mirror.py: {_pink_mirror_path}")
+    pink_mirror = _importlib_util.module_from_spec(_pink_spec)
+    sys.modules["pink_mirror"] = pink_mirror
+    _pink_spec.loader.exec_module(pink_mirror)
+else:
+    import pink_mirror
+
+_required_pink_functions = (
+    "step_series", "step_last", "mirror_series", "mirror_last"
+)
+_missing_pink_functions = [
+    name for name in _required_pink_functions
+    if not callable(getattr(pink_mirror, name, None))
+]
+if _missing_pink_functions:
+    raise ImportError(
+        "The bundled pink_mirror.py is incomplete. Missing: "
+        + ", ".join(_missing_pink_functions)
+        + f" | loaded from: {getattr(pink_mirror, '__file__', 'unknown')}"
+    )
+print(f"✅ pink_mirror loaded from: {getattr(pink_mirror, '__file__', 'unknown')}")
+
 import candle_cache
 import nse_backfill
 import indicator_settings
