@@ -44,6 +44,10 @@ def to_weekly(df):
     weekly = daily.resample("W").apply(logic)
     weekly.index = weekly.index - pd.tseries.frequencies.to_offset("6D")
     weekly.index.name = "datetime"
+    # resample('W') creates EMPTY weeks (no trading days / data gap) as NaN rows.
+    # One NaN poisons Wilder ATR for every later bar, so the weekly upperpink step
+    # line freezes at its seed value. TradingView has no bar for an empty week.
+    weekly = weekly.dropna(subset=["open", "high", "low", "close"])
     return weekly.reset_index()
 
 
