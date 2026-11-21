@@ -277,6 +277,10 @@ order_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="ShoonyaO
 nse_backfill_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="NSEBackfill")
 nse_backfill_pending = set()
 nse_backfill_lock = threading.Lock()
+# Load Shoonya candles after WebSocket startup; bounded workers avoid REST bursts.
+history_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ShoonyaHistory")
+history_pending = set()
+history_pending_lock = threading.Lock()
 order_inflight = set()
 order_inflight_lock = threading.Lock()
 order_reconcile_future = None
@@ -1115,6 +1119,39 @@ def _schedule_nse_backfill(symbol_key, trading_symbol, hist_data):
             return
         nse_backfill_pending.add(pending_key)
     nse_backfill_executor.submit(_background_nse_backfill, symbol_key, trading_symbol, hist_data)
+
+
+def _background_symbol_history(symbol_key, trading_symbol, token_key):
+    """Load Shoonya history after the live feed is running; then queue NSE warm-up."""
+    global _history_sig
+    pending_key = str(symbol_key).strip().upper()
+    try:
+        hist_data = fetch_historical_data(trading_symbol)
+        if not hist_data:
+            print(f"[HISTORY] {trading_symbol}: Shoonya history unavailable; live feed remains active")
+            return
+        historical_data_cache[symbol_key] = hist_data
+        live = live_data.get(token_key)
+        if live is not None:
+            _preload_live(live, hist_data)
+        _history_sig = None
+        print(f"[HISTORY] {trading_symbol}: Shoonya history ready ({hist_data.get('source', '')})")
+        _schedule_nse_backfill(symbol_key, trading_symbol, hist_data)
+    except Exception as exc:
+        print(f"[HISTORY] {trading_symbol}: background history failed safely: {exc}")
+    finally:
+        with history_pending_lock:
+            history_pending.discard(pending_key)
+
+
+def _schedule_symbol_history(symbol_key, trading_symbol, token_key):
+    """Queue one Shoonya history load per symbol without blocking live startup."""
+    pending_key = str(symbol_key).strip().upper()
+    with history_pending_lock:
+        if pending_key in history_pending:
+            return
+        history_pending.add(pending_key)
+    history_executor.submit(_background_symbol_history, symbol_key, trading_symbol, token_key)
 
 
 def _current_bar(d, ltp):
@@ -2729,9 +2766,7 @@ def main(auth_code_provider=None):
             tk = f"{exchange}|{token}"
             symbol_tokens[symbol] = tk
             token_symbols[tk] = symbol
-            # Keep the original indicator/history calculations for NSE symbols.
-            hist_data = fetch_historical_data(trading_symbol) if exchange == "NSE" else None
-            
+            # Register the live symbol immediately; candle history loads after WebSocket startup.
             live_data[tk] = {
                 'symbol': symbol,
                 'first_tick': True,
@@ -2749,23 +2784,20 @@ def main(auth_code_provider=None):
                 'timestamp': None
             }
             
-            if hist_data:
-                historical_data_cache[symbol] = hist_data
-                _preload_live(live_data[tk], hist_data)
-                # Queue NSE's missing older weekly candles without delaying symbol startup.
-                _schedule_nse_backfill(symbol, trading_symbol, hist_data)
-                print(f"   [{i:2}/{len(symbols)}] ✓ {symbol}  [{hist_data.get('source', '')}]")
+            if exchange == "NSE":
+                _schedule_symbol_history(symbol, trading_symbol, tk)
+                status = "live token loaded; history loading in background"
             else:
-                status = "live token loaded; historical indicators are NSE-only" if exchange != "NSE" else "historical data unavailable"
-                print(f"   [{i:2}/{len(symbols)}] ✓ {symbol} ({status})")
+                status = "live token loaded; historical indicators are NSE-only"
+            print(f"   [{i:2}/{len(symbols)}] ✓ {symbol} ({status})")
         else:
             print(f"   [{i:2}/{len(symbols)}] ✗ {symbol} (token not found)")
         time.sleep(0.03)
     
     print(f"\n✅ Initialized {len(symbol_tokens)} symbols")
     _elapsed = time.time() - _t_hist
-    print(f"⏱ Shoonya history + initial indicators loaded in {_elapsed:.1f}s "
-          f"({_elapsed / max(len(symbols), 1):.2f}s per symbol). NSE 400-week warm-up continues in background.")
+    print(f"⏱ Live symbol registration completed in {_elapsed:.1f}s "
+          f"({_elapsed / max(len(symbols), 1):.2f}s per symbol). Shoonya history + NSE 400-week warm-up continue in background.")
     
     if len(symbol_tokens) == 0:
         print("❌ No symbols!")
