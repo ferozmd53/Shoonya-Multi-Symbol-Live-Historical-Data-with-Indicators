@@ -823,9 +823,16 @@ def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
             return None
 
         if last_bar_confirmed is None:
-            week_start = weekly['datetime'].iloc[-1].date()
-            reference_date = pd.Timestamp(as_of).date() if as_of is not None else datetime.now().date()
-            last_bar_confirmed = reference_date > week_start + timedelta(days=4)
+            if live_bar is None:
+                # Weekly Historical excludes the current week above, so its
+                # latest candle is a completed TradingView weekly candle.
+                last_bar_confirmed = True
+            else:
+                # TradingView's NSE weekly candle closes Friday at 15:30 IST.
+                # Do not let upperpink step on the still-forming weekly candle.
+                week_start = pd.Timestamp(weekly['datetime'].iloc[-1]).to_pydatetime()
+                weekly_close = week_start.replace(hour=15, minute=30, second=0, microsecond=0) + timedelta(days=4)
+                last_bar_confirmed = datetime.now() >= weekly_close
 
         # Weekly calculations must warm up from the weekly start date, not the daily start date.
         params = indicator_params()
@@ -849,9 +856,9 @@ def _weekly_history_row(symbol, base, as_of=None):
 
 
 def _weekly_live_row(symbol, base, live_bar):
-    # The live weekly candle is provisional: allow upperpink to react to its current price.
-    # Weekly Historical remains confirmed and is calculated independently above.
-    snap = _weekly_snapshot(base, live_bar=live_bar, last_bar_confirmed=True)
+    # Keep the live weekly candle provisional until TradingView's Friday
+    # 15:30 IST close; _weekly_snapshot applies that confirmation check.
+    snap = _weekly_snapshot(base, live_bar=live_bar, last_bar_confirmed=None)
     if not snap:
         return [''] * 14
     tick_time = live_bar.get('timestamp')
