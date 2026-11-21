@@ -219,7 +219,7 @@ warnings.filterwarnings('ignore')
 # Locate the workbook beside run.py / in the working folder first.
 # The installed package may live in Python\\Lib\\site-packages, so do not
 # assume the workbook is stored beside this module.
-WORKBOOK_NAME = "PythonTrader_Terminal_LMT.xlsm"
+WORKBOOK_NAME = "VII_CLASS.xlsm"
 RUN_FOLDER = Path(sys.argv[0]).resolve().parent if sys.argv and sys.argv[0] else Path.cwd()
 PACKAGE_FOLDER = Path(__file__).resolve().parent
 
