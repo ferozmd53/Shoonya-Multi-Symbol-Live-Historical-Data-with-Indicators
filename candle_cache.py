@@ -138,14 +138,21 @@ def get_daily(db_path, fetch_fn, exchange, symbol, window_start, today=None,
                 if cached:
                     return [to_raw(r) for r in cached], f"cache only - Shoonya returned nothing ({len(cached)} bars)"
                 return None, "no data"
-            con.execute("DELETE FROM candles WHERE exchange=? AND symbol=? AND date>=?",
-                        (exchange, symbol, window_start.isoformat()))
-            rows = sorted(fetched.values())
+
+            # Merge successful downloads with existing rows instead of deleting
+            # the cache first. If Shoonya has no candles for an older date block,
+            # previously saved history must not be lost.
+            merged = {r[0]: r for r in cached}
+            merged.update(fetched)
+            rows = [merged[d] for d in sorted(merged)]
             _save(con, exchange, symbol, rows, today)
             con.execute("INSERT OR REPLACE INTO candle_meta VALUES (?,?,?,?,?)",
                         (exchange, symbol, window_start.isoformat(), today.isoformat(), today.isoformat()))
             con.commit()
-            return [to_raw(r) for r in rows], f"full download {len(rows)} bars ({reason})"
+            return [to_raw(r) for r in rows], (
+                f"full download {len(fetched)} new/updated bars; "
+                f"{len(rows)} total cached bars ({reason})"
+            )
 
         # Validate the actual first cached candle as well as the metadata.
         # Older versions marked the requested start date as covered even when
