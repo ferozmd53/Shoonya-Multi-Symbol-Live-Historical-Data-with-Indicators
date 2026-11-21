@@ -383,6 +383,18 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
                 f"{required_weeks} weekly candles available; ATR warm-up is incomplete"
             )
 
+        if earliest_known <= start_limit:
+            print(
+                f"[NSE BACKFILL] {nse_symbol}: fixed history anchor reached "
+                f"({start_limit}); earliest candle {earliest_known}"
+            )
+        else:
+            print(
+                f"[NSE BACKFILL] WARNING {nse_symbol}: fixed history anchor "
+                f"{start_limit} NOT reached; earliest candle {earliest_known}. "
+                f"ATR may still differ if additional earlier data becomes available."
+            )
+
         return cached.reset_index(drop=True)
 
     except Exception as exc:
