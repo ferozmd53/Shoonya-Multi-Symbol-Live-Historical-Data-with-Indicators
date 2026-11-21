@@ -311,7 +311,11 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
             return cached.reset_index(drop=True)
 
         print(
-            f"[NSE BACKFILL] {ns        # Always extend to the fixed calculation anchor, even when the
+            f"[NSE BACKFILL] {nse_symbol}: need older candles; "
+            f"weekly ATR warm-up {have_weeks}/{required_weeks}"
+        )
+
+        # Always extend to the fixed calculation anchor, even when the
         # minimum 299-week ATR warm-up is already available. Stopping at the
         # warm-up threshold makes Wilder RMA depend on how much history happened
         # to be downloaded for a particular symbol.
@@ -366,10 +370,6 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
                 break
 
             earliest_known = new_earliest
-            if start_date == start_limit:
-                breakhave_weeks}/{required_weeks}"
-            )
-
             if start_date == start_limit:
                 break
 
