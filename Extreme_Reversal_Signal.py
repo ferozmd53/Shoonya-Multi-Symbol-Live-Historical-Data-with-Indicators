@@ -845,6 +845,9 @@ def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
         # Weekly calculations must warm up from the weekly start date, not the daily start date.
         params = indicator_params()
         params['first_bar_date'] = Config.WEEKLY_FIRST_BAR_DATE
+        # TradingView reference seeds weekly upperpink at bar_index 200
+        # within the latest 400 weekly candles. Other indicators use all history.
+        params['step_lookback'] = 400
         return indicator_history.snapshot(weekly, params, last_bar_confirmed)
     except Exception as exc:
         print(f"⚠️ Weekly calculation: {exc}")
@@ -2519,14 +2522,18 @@ def refresh_indicator_history(force=False):
     weekly_base = indicator_history.to_weekly(base)
     weekly_params = dict(params)
     weekly_params['first_bar_date'] = Config.WEEKLY_FIRST_BAR_DATE
+    weekly_params['step_lookback'] = 400
     if Config.WEEKLY_FIRST_BAR_DATE:
         weekly_base = weekly_base[
             weekly_base['datetime'] >= pd.Timestamp(Config.WEEKLY_FIRST_BAR_DATE)
         ].reset_index(drop=True)
+    weekly_total_count = len(weekly_base)
     weekly_tbl = pd.DataFrame(columns=indicator_history.TABLE_COLUMNS)
     if not weekly_base.empty:
         latest_week_start = pd.Timestamp(weekly_base['datetime'].iloc[-1]).date()
         weekly_confirmed = datetime.now().date() > latest_week_start + timedelta(days=4)
+        # Keep all history for BB/NWE/mirror; indicator_history applies the
+        # 400-bar limit only to upperpink's step calculation.
         weekly_tbl = indicator_history.table(
             weekly_base, min(days, len(weekly_base)), weekly_params, weekly_confirmed
         )
@@ -2562,7 +2569,7 @@ def refresh_indicator_history(force=False):
     weekly_header_row = weekly_title_row + 1
     weekly_data_row = weekly_header_row + 1
     ws.range(f"A{weekly_title_row}").value = (
-        f"WEEKLY INDICATOR HISTORY — {len(weekly_base)} total weekly candles; "
+        f"WEEKLY INDICATOR HISTORY — {weekly_total_count} total weekly candles; "
         f"showing latest {len(weekly_values)}"
     )
     ws.range(f"A{weekly_header_row}:M{weekly_header_row}").value = indicator_history.TABLE_COLUMNS
@@ -2578,7 +2585,7 @@ def refresh_indicator_history(force=False):
     _set_history_status(
         ws,
         f"OK {datetime.now():%H:%M:%S} | {key} | Daily {len(base)} candles "
-        f"({daily_range}); shown {len(daily_values)} | Weekly {len(weekly_base)} candles; "
+        f"({daily_range}); shown {len(daily_values)} | Weekly {weekly_total_count} candles; "
         f"shown {len(weekly_values)} | upperpink Daily: {daily_atr}; Weekly: {weekly_atr}"
     )
     try:
