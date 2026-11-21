@@ -343,6 +343,7 @@ def get_order_headers():
 import nadaraya_watson
 import pink_mirror
 import candle_cache
+import nse_backfill
 import indicator_settings
 import indicator_history
 
@@ -384,6 +385,10 @@ class Config:
     # later runs only fetch the last few days (or nothing when the cache is already up to date).
     USE_CANDLE_CACHE = True
     CANDLE_DB_PATH = str(WORKBOOK_PATH.parent / "daily_candles.db")   # beside the workbook
+    NSE_BACKFILL_DB_PATH = str(WORKBOOK_PATH.parent / "nse_backfill.db")
+    NSE_BACKFILL_ENABLED = True
+    # Shoonya's daily-history lookback is about five years; NSE fills only the older gap.
+    SHOONYA_HISTORY_LOOKBACK_DAYS = 1825
     CANDLE_OVERLAP_DAYS = 10          # already-cached days re-fetched to detect splits/bonus
     CANDLE_FULL_REFRESH_DAYS = 30     # full re-download this often
     # mirror band + step line inputs (overridden from the LOGIN sheet, column M:N)
@@ -825,6 +830,11 @@ def _weekly_live_row(symbol, base, live_bar):
         tick_time.strftime('%H:%M:%S') if tick_time else ''
     ]
 
+def _shoonya_history_start(from_date, to_dt):
+    end_day = to_dt.date() if isinstance(to_dt, datetime) else to_dt
+    return max(from_date, end_day - timedelta(days=Config.SHOONYA_HISTORY_LOOKBACK_DAYS))
+
+
 def _download_df(symbol):
     """Daily candles (DataFrame) + source text, or (None, reason)."""
     end_date = datetime.now()
@@ -834,7 +844,9 @@ def _download_df(symbol):
         try:
             parsed_data, source = candle_cache.get_daily(
                 Config.CANDLE_DB_PATH,
-                lambda frm, to: _download_daily_rows(symbol, frm, to),
+                lambda frm, to: _download_daily_rows(
+                    symbol, _shoonya_history_start(frm, to), to
+                ),
                 "NSE", symbol, start_date.date(),
                 overlap_days=Config.CANDLE_OVERLAP_DAYS,
                 full_refresh_days=Config.CANDLE_FULL_REFRESH_DAYS)
@@ -842,7 +854,9 @@ def _download_df(symbol):
             print(f"⚠️ Candle cache unavailable ({exc}); loading {symbol} from Shoonya directly")
             parsed_data, source = None, "Shoonya (cache error)"
     if parsed_data is None and source in ("Shoonya", "Shoonya (cache error)"):
-        parsed_data = _download_daily_rows(symbol, start_date.date(), end_date)
+        parsed_data = _download_daily_rows(
+            symbol, _shoonya_history_start(start_date.date(), end_date), end_date
+        )
     if not parsed_data:
         return None, source
 
@@ -856,6 +870,24 @@ def _download_df(symbol):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.sort_values('datetime').dropna().reset_index(drop=True)
+
+    # Add only older NSE EQ candles required for the weekly upperpink ATR warm-up.
+    # Shoonya remains the source for all recent candles; no indicator formula changes.
+    if Config.NSE_BACKFILL_ENABLED:
+        try:
+            extra = nse_backfill.get_extra_history(
+                symbol, df, Config.NSE_BACKFILL_DB_PATH,
+                Config.WEEKLY_FIRST_BAR_DATE, Config.PM_ATR_LEN,
+                Config.PM_ATR_HI, Config.PM_START_BAR
+            )
+            if extra is not None and not extra.empty:
+                df = pd.concat([extra, df], ignore_index=True)
+                df = df.sort_values('datetime').drop_duplicates('datetime', keep='last')
+                df = df.reset_index(drop=True)
+                source = f"{source} + NSE older history ({len(extra)} candles)"
+        except Exception as exc:
+            print(f"⚠️ NSE older-history backfill skipped for {symbol}: {exc}")
+
     return df, source
 
 
