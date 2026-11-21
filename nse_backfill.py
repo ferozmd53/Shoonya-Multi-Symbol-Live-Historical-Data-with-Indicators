@@ -1,10 +1,8 @@
-"""NSE older-history backfill for stable weekly ATR initialization.
+"""NSE older-history backfill for the 400-week TradingView indicator window.
 
-Downloads the available NSE cash-equity history back to the configured,
-fixed weekly calculation anchor (normally 2010-01-01), not merely until the
-minimum ATR warm-up count is reached. This keeps Wilder RMA initialization
-consistent when the amount of downloaded history changes between runs.
-NSE rows are cached separately from Shoonya's more recent candle history.
+Shoonya supplies recent daily candles. NSE supplies only the missing older
+candles required to reach 400 weekly bars. Results are cached in SQLite and
+reused on later starts; live startup never waits for this background task.
 """
 import asyncio
 import re
@@ -275,8 +273,8 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
                       atr_len=200, atr_highest=100, start_bar=200):
     """Return ONLY older NSE candles needed to make weekly upperpink ATR ready.
 
-    The current Pine port reports ATR READY after max(start_bar+1,
-    atr_len+atr_highest-1) weekly candles. Existing NSE cache is reused.
+    The TradingView reference uses at least 400 weekly candles. Existing NSE
+    cache is reused, and only the remaining weekly-bar deficit is requested.
     """
     raw_symbol = str(symbol or "").strip().upper()
     if raw_symbol.endswith("-EQ"):
@@ -305,9 +303,7 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
         combined = pd.concat([cached, shoonya], ignore_index=True)
         combined = combined.sort_values("datetime").drop_duplicates("datetime", keep="last")
         have_weeks = _weekly_count(combined, start_limit)
-        # Seed the backfill cursor from the oldest candle already available.
-        # Without this initialization, the fixed-anchor loop raises
-        # UnboundLocalError before it can request any NSE history.
+        # Seed the cursor from the oldest candle already available.
         earliest_known = min(
             shoonya_first,
             cached["datetime"].min().date() if not cached.empty else shoonya_first
@@ -325,16 +321,19 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
                 f"weekly history {have_weeks}/{required_weeks}"
             )
 
-        # Fetch backwards only until the 400-week TradingView history target is met.
-        # This runs in a background worker, never in the live-startup path.
+        # Fetch only the calendar span needed for the remaining weekly deficit,
+        # with a small buffer for exchange holidays and partial first/last weeks.
+        # This function is called by the background worker, never live startup.
         while have_weeks < required_weeks and earliest_known > start_limit + timedelta(days=7):
             end_date = earliest_known - timedelta(days=1)
-            start_date = max(start_limit, end_date - timedelta(days=419))
+            missing_weeks = required_weeks - have_weeks
+            days_needed = missing_weeks * 7 + 14
+            start_date = max(start_limit, end_date - timedelta(days=days_needed))
             if start_date > end_date:
                 break
 
             print(
-                f"[NSE BACKFILL] {nse_symbol}: completing fixed history "
+                f"[NSE BACKFILL] {nse_symbol}: requesting missing weekly history "
                 f"{start_date} to {end_date}"
             )
             if aiohttp is not None:
@@ -392,16 +391,10 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
                 f"{required_weeks} weekly candles available; ATR warm-up is incomplete"
             )
 
-        if earliest_known <= start_limit + timedelta(days=7):
+        if have_weeks < required_weeks and earliest_known <= start_limit + timedelta(days=7):
             print(
-                f"[NSE BACKFILL] {nse_symbol}: fixed history anchor reached "
-                f"({start_limit}); earliest candle {earliest_known}"
-            )
-        else:
-            print(
-                f"[NSE BACKFILL] WARNING {nse_symbol}: fixed history anchor "
-                f"{start_limit} NOT reached; earliest candle {earliest_known}. "
-                f"ATR may still differ if additional earlier data becomes available."
+                f"[NSE BACKFILL] WARNING {nse_symbol}: NSE history starts at "
+                f"{earliest_known}; only {have_weeks}/{required_weeks} weekly bars exist."
             )
 
         return cached.reset_index(drop=True)
