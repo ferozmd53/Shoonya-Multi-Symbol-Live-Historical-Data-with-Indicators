@@ -838,7 +838,11 @@ def _shoonya_history_start(from_date, to_dt):
 def _download_df(symbol):
     """Daily candles (DataFrame) + source text, or (None, reason)."""
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=history_days())
+    # Shoonya supplies the recent ~5-year window; NSE backfills only the older
+    # weekly ATR warm-up gap, avoiding repeated empty Shoonya requests before it.
+    start_date = end_date - timedelta(days=min(
+        history_days(), Config.SHOONYA_HISTORY_LOOKBACK_DAYS
+    ))
     parsed_data, source = None, "Shoonya"
     if Config.USE_CANDLE_CACHE:
         try:
