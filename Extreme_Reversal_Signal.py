@@ -568,43 +568,110 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
 # ============================================
 
 def _download_daily_rows(symbol, from_date, to_dt):
-    """Download Shoonya daily candles in small date chunks and de-duplicate them.
+    """Download daily candles in five-year blocks and small Shoonya API chunks.
 
-    Shoonya may truncate a long get_daily_price_series response. Chunking the
-    request prevents the weekly indicator from silently receiving only part of
-    the required 2020-onward history.
+    The five-year blocks make long history requests easy to audit. Each block is
+    still split into <=180-calendar-day API requests to avoid response truncation.
+    No indicator calculation or formula is performed here.
     """
     rows_by_date = {}
-    cursor = from_date
     final_date = to_dt.date() if isinstance(to_dt, datetime) else to_dt
+    block_start = from_date
+    failed_chunks = []
 
-    while cursor <= final_date:
-        chunk_end = min(cursor + timedelta(days=179), final_date)
-        start_epoch = int(datetime.combine(cursor, datetime.min.time()).timestamp())
-        end_epoch = int(datetime.combine(chunk_end, datetime.max.time()).timestamp())
-
-        ret = api.get_daily_price_series(
-            exchange="NSE", tradingsymbol=symbol,
-            startdate=str(start_epoch), enddate=str(end_epoch)
+    while block_start <= final_date:
+        # Align blocks to five-year calendar boundaries: 2010-2014, 2015-2019, etc.
+        next_boundary_year = ((block_start.year // 5) + 1) * 5
+        block_end = min(date(next_boundary_year, 1, 1) - timedelta(days=1), final_date)
+        print(
+            f"[HISTORY] {symbol} block {block_start:%Y-%m-%d} to "
+            f"{block_end:%Y-%m-%d}"
         )
 
-        if isinstance(ret, dict):
-            ret = [ret]
-        for item in ret or []:
-            if isinstance(item, str):
-                try:
-                    item = json.loads(item)
-                except Exception:
-                    continue
-            if not isinstance(item, dict) or not item.get("time"):
-                continue
-            try:
-                bar_date = datetime.strptime(str(item["time"]).strip(), "%d-%b-%Y").date()
-            except Exception:
-                continue
-            rows_by_date[bar_date] = item
+        cursor = block_start
+        while cursor <= block_end:
+            chunk_end = min(cursor + timedelta(days=179), block_end)
+            start_epoch = int(datetime.combine(cursor, datetime.min.time()).timestamp())
+            end_epoch = int(datetime.combine(chunk_end, datetime.max.time()).timestamp())
+            chunk_rows = {}
 
-        cursor = chunk_end + timedelta(days=1)
+            try:
+                ret = api.get_daily_price_series(
+                    exchange="NSE", tradingsymbol=symbol,
+                    startdate=str(start_epoch), enddate=str(end_epoch)
+                )
+
+                if isinstance(ret, dict):
+                    if ret.get("stat") == "Not_Ok" or ret.get("emsg"):
+                        message = ret.get("emsg") or ret
+                        failed_chunks.append((cursor, chunk_end, str(message)))
+                        print(
+                            f"[HISTORY] ERROR {symbol} {cursor:%Y-%m-%d} to "
+                            f"{chunk_end:%Y-%m-%d}: {message}"
+                        )
+                        cursor = chunk_end + timedelta(days=1)
+                        continue
+                    ret = [ret]
+
+                for item in ret or []:
+                    if isinstance(item, str):
+                        try:
+                            item = json.loads(item)
+                        except Exception:
+                            continue
+                    if not isinstance(item, dict) or not item.get("time"):
+                        continue
+                    try:
+                        bar_date = datetime.strptime(
+                            str(item["time"]).strip(), "%d-%b-%Y"
+                        ).date()
+                    except Exception:
+                        continue
+                    chunk_rows[bar_date] = item
+
+                rows_by_date.update(chunk_rows)
+                if chunk_rows:
+                    first_date = min(chunk_rows)
+                    last_date = max(chunk_rows)
+                    print(
+                        f"[HISTORY] {symbol} {cursor:%Y-%m-%d} to "
+                        f"{chunk_end:%Y-%m-%d}: {len(chunk_rows)} candles; "
+                        f"returned {first_date:%Y-%m-%d} to {last_date:%Y-%m-%d}"
+                    )
+                else:
+                    print(
+                        f"[HISTORY] {symbol} {cursor:%Y-%m-%d} to "
+                        f"{chunk_end:%Y-%m-%d}: 0 candles"
+                    )
+            except Exception as exc:
+                failed_chunks.append((cursor, chunk_end, str(exc)))
+                print(
+                    f"[HISTORY] ERROR {symbol} {cursor:%Y-%m-%d} to "
+                    f"{chunk_end:%Y-%m-%d}: {exc}"
+                )
+
+            cursor = chunk_end + timedelta(days=1)
+
+        print(
+            f"[HISTORY] {symbol} block complete: "
+            f"{sum(1 for d in rows_by_date if block_start <= d <= block_end)} "
+            f"unique candles"
+        )
+        block_start = block_end + timedelta(days=1)
+
+    if failed_chunks:
+        raise RuntimeError(
+            f"{len(failed_chunks)} Shoonya history chunk(s) failed for {symbol}; "
+            "existing cached history will be preserved. See [HISTORY] log lines."
+        )
+
+    if rows_by_date:
+        print(
+            f"[HISTORY] {symbol} TOTAL: {len(rows_by_date)} unique candles; "
+            f"{min(rows_by_date):%Y-%m-%d} to {max(rows_by_date):%Y-%m-%d}"
+        )
+    else:
+        print(f"[HISTORY] {symbol} TOTAL: 0 candles returned by Shoonya")
 
     return [rows_by_date[d] for d in sorted(rows_by_date)]
 
