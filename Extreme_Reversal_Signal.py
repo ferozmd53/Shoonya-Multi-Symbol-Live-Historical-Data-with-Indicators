@@ -376,8 +376,10 @@ class Config:
     # must be FIXED (otherwise the seed drifts every day). Set this to the date of
     # the first bar your TradingView chart loaded to line the step up with it.
     PM_FIRST_BAR_DATE = '2023-01-02'
-    # Weekly step indicator needs enough weekly bars for ATR(200) + highest(100).
-    WEEKLY_FIRST_BAR_DATE = '2020-01-06'
+    # Daily calculations retain their existing history start; weekly ATR uses all
+    # available history from 2010 so Wilder ATR has the longest practical warm-up.
+    DAILY_CALC_FIRST_BAR_DATE = '2020-01-06'
+    WEEKLY_FIRST_BAR_DATE = '2010-01-01'
     # SQLite cache of the DAILY candles (candle_cache.py): the full history is downloaded once,
     # later runs only fetch the last few days (or nothing when the cache is already up to date).
     USE_CANDLE_CACHE = True
@@ -871,8 +873,14 @@ def fetch_historical_data(symbol):
 def _build_hist(df, symbol, source):
     """Indicators from already-downloaded candles (no network).  Used at start-up and on a settings change."""
     try:
+        # Keep the complete downloaded candle history for weekly aggregation.
+        # Daily calculations retain their previous input window so extending weekly
+        # history cannot alter the existing daily indicator outputs.
         base = df[['datetime', 'open', 'high', 'low', 'close', 'volume']].copy().reset_index(drop=True)
-        df = base.copy()
+        daily_base = base[
+            base['datetime'] >= pd.Timestamp(Config.DAILY_CALC_FIRST_BAR_DATE)
+        ].copy().reset_index(drop=True)
+        df = daily_base.copy()
         if len(df) < max(Config.BB_LENGTH, 3):
             return None
 
@@ -938,7 +946,7 @@ def _build_hist(df, symbol, source):
         # AS_OF_DATE: what the indicators showed on that past day (point-in-time)
         asof_row = None
         if Config.AS_OF_DATE:
-            cut = base[base['datetime'] <= pd.Timestamp(Config.AS_OF_DATE)]
+            cut = daily_base[daily_base['datetime'] <= pd.Timestamp(Config.AS_OF_DATE)]
             if len(cut) >= 3:
                 try:
                     asof_row = _row_from_snapshot(indicator_history.snapshot(cut.reset_index(drop=True), params, True))
