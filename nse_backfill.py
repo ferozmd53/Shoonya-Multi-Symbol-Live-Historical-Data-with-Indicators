@@ -305,10 +305,9 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
 
         if have_weeks >= required_weeks:
             print(
-                f"[NSE BACKFILL] {nse_symbol}: ATR warm-up ready "
-                f"({have_weeks}/{required_weeks} weekly candles; NSE cache used)"
+                f"[NSE BACKFILL] {nse_symbol}: minimum ATR warm-up is ready "
+                f"({have_weeks}/{required_weeks}); checking the full fixed history anchor"
             )
-            return cached.reset_index(drop=True)
 
         print(
             f"[NSE BACKFILL] {nse_symbol}: need older candles; "
