@@ -392,15 +392,17 @@ class Config:
     CANDLE_OVERLAP_DAYS = 10          # already-cached days re-fetched to detect splits/bonus
     CANDLE_FULL_REFRESH_DAYS = 30     # full re-download this often
     # mirror band + step line inputs (overridden from the LOGIN sheet, column M:N)
-    PM_LEN = pink_mirror.LEN
-    PM_MULT = pink_mirror.MULT
-    PM_REF = pink_mirror.REF_COL
-    PM_SMA_COL = pink_mirror.SMA_COL
-    PM_STEP_WIDTH = pink_mirror.STEP_WIDTH
-    PM_STEP_SRC = pink_mirror.STEP_SRC
-    PM_ATR_LEN = pink_mirror.ATR_LEN
-    PM_ATR_HI = pink_mirror.ATR_HIGHEST
-    PM_START_BAR = pink_mirror.START_BAR
+    # Use safe defaults when an older pink_mirror.py is found on the
+    # Windows Python path. The current bundled module defines all these values.
+    PM_LEN = getattr(pink_mirror, "LEN", 5)
+    PM_MULT = getattr(pink_mirror, "MULT", -0.3)
+    PM_REF = getattr(pink_mirror, "REF_COL", "open")
+    PM_SMA_COL = getattr(pink_mirror, "SMA_COL", "low")
+    PM_STEP_WIDTH = getattr(pink_mirror, "STEP_WIDTH", 0.7)
+    PM_STEP_SRC = getattr(pink_mirror, "STEP_SRC", "low")
+    PM_ATR_LEN = getattr(pink_mirror, "ATR_LEN", 200)
+    PM_ATR_HI = getattr(pink_mirror, "ATR_HIGHEST", 100)
+    PM_START_BAR = getattr(pink_mirror, "START_BAR", 200)
     ORDER_BUFFER_RS = 0.0             # fixed rupees added (BUY) / subtracted (SELL) from LTP; 0 = use the % below
     ORDER_BUFFER_PCT = 0.5            # Shoonya refuses API MKT orders -> marketable LIMIT at LTP +/- this % (LOGIN: ORDER_BUFFER_PCT)
     AS_OF_DATE = None                 # date -> historical block shows that past day
