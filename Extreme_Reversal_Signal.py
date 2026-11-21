@@ -789,7 +789,11 @@ def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
             return None
 
         # Overlay the live session's OHLCV on the daily candles before weekly aggregation.
-        if live_bar is not None:
+        # On Sat/Sun there is no trading session: the touchline still carries stale/pre-open
+        # ticks, and with no candle for "today" they were appended as an extra pseudo-day
+        # (wrong week High/Low, volume added twice, BB/mirror shifted). Skip the overlay then,
+        # so the live weekly block equals the completed weekly candle.
+        if live_bar is not None and datetime.now().weekday() < 5:
             ltp = safe_float(live_bar.get('ltp', 0))
             tick_time = live_bar.get('timestamp')
             today = pd.Timestamp(datetime.now().date())
