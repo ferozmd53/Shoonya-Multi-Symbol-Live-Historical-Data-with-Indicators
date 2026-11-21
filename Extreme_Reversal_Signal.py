@@ -716,7 +716,9 @@ def _weekly_history_row(symbol, base, as_of=None):
 
 
 def _weekly_live_row(symbol, base, live_bar):
-    snap = _weekly_snapshot(base, live_bar=live_bar, last_bar_confirmed=False)
+    # The live weekly candle is provisional: allow upperpink to react to its current price.
+    # Weekly Historical remains confirmed and is calculated independently above.
+    snap = _weekly_snapshot(base, live_bar=live_bar, last_bar_confirmed=True)
     if not snap:
         return [''] * 14
     tick_time = live_bar.get('timestamp')
