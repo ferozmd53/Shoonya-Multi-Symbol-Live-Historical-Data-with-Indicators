@@ -678,7 +678,8 @@ def _weekly_upperpink(base, as_of=None, live_bar=None, last_bar_confirmed=None):
 
         if last_bar_confirmed is None:
             week_start = weekly['datetime'].iloc[-1].date()
-            last_bar_confirmed = datetime.now().date() > week_start + timedelta(days=4)
+            reference_date = pd.Timestamp(as_of).date() if as_of is not None else datetime.now().date()
+            last_bar_confirmed = reference_date > week_start + timedelta(days=4)
 
         value = pink_mirror.step_last(
             weekly['high'].astype(float).values,
