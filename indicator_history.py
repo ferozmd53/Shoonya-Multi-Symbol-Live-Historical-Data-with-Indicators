@@ -65,6 +65,11 @@ def snapshot(df, p, last_bar_confirmed=True):
     nwe_buy, nwe_sell = nadaraya_watson.nwe_last_bar_signal(
         _f(df, p["nwe_src"]), _f(df, "close"), p["nwe_h"], p["nwe_mult"], p["nwe_repaint"])
     pm = _trim_first_bar(df, p["first_bar_date"])
+    # Optional bounded calculation window is used by WEEKLY upperpink only.
+    # Other indicators continue to use the complete candle history.
+    step_lookback = int(p.get("step_lookback") or 0)
+    if step_lookback > 0:
+        pm = pm.tail(step_lookback).reset_index(drop=True)
     pink = pink_mirror.step_last(
         _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
         p["step_width"], p["atr_len"], p["atr_hi"], p["start_bar"], last_bar_confirmed)
@@ -89,24 +94,25 @@ def table(df, days, p, last_bar_confirmed=True):
     mirror = pink_mirror.mirror_series(_f(df, p["pm_sma"]), _f(df, p["pm_ref"]), p["pm_len"], p["pm_mult"])
 
     pm = _trim_first_bar(df, p["first_bar_date"])
+    step_lookback = int(p.get("step_lookback") or 0)
+    if step_lookback > 0:
+        pm = pm.tail(step_lookback).reset_index(drop=True)
+    pm_offset = n - len(pm)
     pink = np.full(n, np.nan)
     if len(pm):
         st = pink_mirror.step_series(
             _f(pm, "high"), _f(pm, "low"), _f(pm, "close"), _f(pm, p["step_src"]),
             p["step_width"], p["atr_len"], p["atr_hi"], p["start_bar"], last_bar_confirmed)
-        pink[n - len(pm):] = st
+        pink[pm_offset:] = st
 
     src, close = _f(df, p["nwe_src"]), _f(df, "close")
     # Show whether upperpink has enough bars for both its seed and ATR-highest window.
-    first_bar = pd.Timestamp(p["first_bar_date"]) if p.get("first_bar_date") else None
-    pm_offset = int(np.searchsorted(pd.to_datetime(df["datetime"]).values,
-                                    first_bar.to_datetime64(), side="left")) if first_bar is not None else 0
     seed_required = int(p["start_bar"]) + 1
     atr_required = int(p["atr_len"]) + int(p["atr_hi"]) - 1
     pink_status = []
     for bar_index in range(n):
         if bar_index < pm_offset:
-            pink_status.append("BEFORE START DATE")
+            pink_status.append("OUTSIDE STEP WINDOW" if step_lookback > 0 else "BEFORE START DATE")
             continue
         bars_available = bar_index - pm_offset + 1
         if bars_available < seed_required:
