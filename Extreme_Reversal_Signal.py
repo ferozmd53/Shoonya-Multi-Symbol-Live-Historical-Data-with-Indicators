@@ -568,21 +568,45 @@ def place_order(symbol, qty, buy_sell, price=0, product_type='C', algo_id=None):
 # ============================================
 
 def _download_daily_rows(symbol, from_date, to_dt):
-    """Raw daily rows from Shoonya between from_date and to_dt (list of dicts)."""
-    start_epoch = int(datetime.combine(from_date, datetime.min.time()).timestamp())
-    end_epoch = int(to_dt.timestamp())
-    ret = api.get_daily_price_series(
-        exchange="NSE", tradingsymbol=symbol,
-        startdate=str(start_epoch), enddate=str(end_epoch)
-    )
-    rows = []
-    for item in ret or []:
-        if isinstance(item, str):
+    """Download Shoonya daily candles in small date chunks and de-duplicate them.
+
+    Shoonya may truncate a long get_daily_price_series response. Chunking the
+    request prevents the weekly indicator from silently receiving only part of
+    the required 2020-onward history.
+    """
+    rows_by_date = {}
+    cursor = from_date
+    final_date = to_dt.date() if isinstance(to_dt, datetime) else to_dt
+
+    while cursor <= final_date:
+        chunk_end = min(cursor + timedelta(days=179), final_date)
+        start_epoch = int(datetime.combine(cursor, datetime.min.time()).timestamp())
+        end_epoch = int(datetime.combine(chunk_end, datetime.max.time()).timestamp())
+
+        ret = api.get_daily_price_series(
+            exchange="NSE", tradingsymbol=symbol,
+            startdate=str(start_epoch), enddate=str(end_epoch)
+        )
+
+        if isinstance(ret, dict):
+            ret = [ret]
+        for item in ret or []:
+            if isinstance(item, str):
+                try:
+                    item = json.loads(item)
+                except Exception:
+                    continue
+            if not isinstance(item, dict) or not item.get("time"):
+                continue
             try:
-                rows.append(json.loads(item))
+                bar_date = datetime.strptime(str(item["time"]).strip(), "%d-%b-%Y").date()
             except Exception:
                 continue
-    return rows
+            rows_by_date[bar_date] = item
+
+        cursor = chunk_end + timedelta(days=1)
+
+    return [rows_by_date[d] for d in sorted(rows_by_date)]
 
 
 def history_days():
@@ -710,7 +734,7 @@ def _weekly_history_row(symbol, base, as_of=None):
     if not snap:
         return [''] * 13
     return [
-        symbol, snap['datetime'].strftime('%d/%m/%Y'),
+        symbol, pd.Timestamp(snap['datetime']).to_pydatetime(),
         snap['open'], snap['high'], snap['low'], snap['close'], snap['volume'],
         snap['nwe_buy'], snap['nwe_sell'], _rnd(snap['bb_upper']), _rnd(snap['bb_lower']),
         _rnd(snap['pink']), _rnd(snap['mirror'])
@@ -725,7 +749,7 @@ def _weekly_live_row(symbol, base, live_bar):
         return [''] * 14
     tick_time = live_bar.get('timestamp')
     return [
-        symbol, snap['datetime'].strftime('%d/%m/%Y'), snap['close'],
+        symbol, pd.Timestamp(snap['datetime']).to_pydatetime(), snap['close'],
         snap['open'], snap['high'], snap['low'], snap['volume'],
         snap['nwe_buy'], snap['nwe_sell'], _rnd(snap['bb_upper']), _rnd(snap['bb_lower']),
         _rnd(snap['pink']), _rnd(snap['mirror']),
@@ -1869,6 +1893,10 @@ def update_excel_bulk():
                 # Fixed user workbook positions; never insert, delete, or shift columns.
                 ws.range(f"AL2:AX{last_row}").value = weekly_history_rows
                 ws.range(f"AY2:BL{last_row}").value = weekly_live_rows
+                # Store week-start dates as real Excel dates with an explicit
+                # day/month/year display, independent of Windows locale.
+                ws.range(f"AM2:AM{last_row}").number_format = "dd/mm/yyyy"
+                ws.range(f"AZ2:AZ{last_row}").number_format = "dd/mm/yyyy"
                 last_hist_excel_update = now
                 # Separate broker-daily-candle weekly OHLCV output (WEEKLY_DATA sheet).
                 weekly_data_engine.refresh_from_excel(excel_name, api, read_symbols_from_excel())
