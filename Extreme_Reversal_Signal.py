@@ -834,14 +834,9 @@ def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None, s
             current_week_start = pd.Timestamp(
                 reference_date - timedelta(days=reference_date.weekday())
             )
-            # Drop the current week only while it is still open (NSE weekly closes
-            # Friday 15:30 IST). After that (Fri evening / weekend) it is a completed
-            # TradingView candle and must be kept.
-            current_week_close = current_week_start + timedelta(days=4, hours=15, minutes=30)
-            week_is_open = (as_of is None and datetime.now() < current_week_close) \
-                or (as_of is not None and pd.Timestamp(as_of) < current_week_close)
-            if week_is_open:
-                weekly = weekly[weekly['datetime'] < current_week_start].copy()
+            # AL:AX = PREVIOUS week. The week of the reference date is the LIVE week
+            # (AZ:BL), so it is always excluded here: live 16/11 -> previous 09/11.
+            weekly = weekly[weekly['datetime'] < current_week_start].copy()
 
         if Config.WEEKLY_FIRST_BAR_DATE:
             weekly = weekly[weekly['datetime'] >= pd.Timestamp(Config.WEEKLY_FIRST_BAR_DATE)]
@@ -2136,12 +2131,6 @@ def update_excel_bulk():
                     _weekly_live_row(symbol, hist.get('base'), data)
                     if hist and data else [''] * 14
                 )
-                # Weekly live upperpink (BJ) must equal the weekly historical upperpink (AW),
-                # which is the value verified against TradingView. Column 11 is upperpink
-                # in both row layouts (history AL:AX, live AY:BL).
-                wh, wl = weekly_history_rows[-1], weekly_live_rows[-1]
-                if len(wh) > 11 and len(wl) > 11 and wh[11] != '' and wl[11] != '':
-                    wl[11] = wh[11]
 
         if symbols_data:
             last_row = 1 + len(symbols_data)
