@@ -18,7 +18,8 @@ import nadaraya_watson
 import pink_mirror
 
 TABLE_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume", "BB Upper", "BB Lower",
-                 "NADARYA BUY", "NADARYA SELL", "upperpink", "mirrorUpperBand"]
+                 "NADARYA BUY", "NADARYA SELL", "upperpink", "mirrorUpperBand",
+                 "upperpink ATR Status"]
 
 
 def to_weekly(df):
@@ -96,6 +97,25 @@ def table(df, days, p, last_bar_confirmed=True):
         pink[n - len(pm):] = st
 
     src, close = _f(df, p["nwe_src"]), _f(df, "close")
+    # Show whether upperpink has enough bars for both its seed and ATR-highest window.
+    first_bar = pd.Timestamp(p["first_bar_date"]) if p.get("first_bar_date") else None
+    pm_offset = int(np.searchsorted(pd.to_datetime(df["datetime"]).values,
+                                    first_bar.to_datetime64(), side="left")) if first_bar is not None else 0
+    seed_required = int(p["start_bar"]) + 1
+    atr_required = int(p["atr_len"]) + int(p["atr_hi"]) - 1
+    pink_status = []
+    for bar_index in range(n):
+        if bar_index < pm_offset:
+            pink_status.append("BEFORE START DATE")
+            continue
+        bars_available = bar_index - pm_offset + 1
+        if bars_available < seed_required:
+            pink_status.append(f"SEED WARMUP {bars_available}/{seed_required}")
+        elif bars_available < atr_required:
+            pink_status.append(f"ATR WARMUP {bars_available}/{atr_required}")
+        else:
+            pink_status.append("ATR READY")
+
     rows = []
     for i in range(n - days, n):
         buy, sell = nadaraya_watson.nwe_last_bar_signal(
@@ -103,6 +123,7 @@ def table(df, days, p, last_bar_confirmed=True):
         r = df.iloc[i]
         rows.append([r["datetime"].strftime("%d/%m/%Y"),
                      float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
-                     float(r["volume"]), bb_u[i], bb_l[i], bool(buy), bool(sell), pink[i], mirror[i]])
+                     float(r["volume"]), bb_u[i], bb_l[i], bool(buy), bool(sell), pink[i], mirror[i],
+                     pink_status[i]])
     out = pd.DataFrame(rows, columns=TABLE_COLUMNS)
     return out.iloc[::-1].reset_index(drop=True)
