@@ -261,6 +261,7 @@ _ensure_sheet("LOGIN")
 _ensure_sheet("symbols")
 instrument_master = InstrumentMaster()
 api = None
+weekly_data_engine = WeeklyDataEngine()
 feed_opened = False
 live_data = {}
 symbol_tokens = {}
@@ -343,6 +344,7 @@ import pink_mirror
 import candle_cache
 import indicator_settings
 import indicator_history
+from Weekly import WeeklyDataEngine
 
 # ============================================
 # CONFIGURATION - FULLY CUSTOMIZABLE
@@ -1868,6 +1870,8 @@ def update_excel_bulk():
                 ws.range(f"AL2:AX{last_row}").value = weekly_history_rows
                 ws.range(f"AY2:BL{last_row}").value = weekly_live_rows
                 last_hist_excel_update = now
+                # Separate broker-daily-candle weekly OHLCV output (WEEKLY_DATA sheet).
+                weekly_data_engine.refresh_from_excel(excel_name, api, read_symbols_from_excel())
 
     except Exception as exc:
         print(f"Excel update error: {exc}")
