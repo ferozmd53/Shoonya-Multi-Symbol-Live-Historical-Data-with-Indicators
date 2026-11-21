@@ -2128,6 +2128,12 @@ def update_excel_bulk():
                     _weekly_live_row(symbol, hist.get('base'), data)
                     if hist and data else [''] * 14
                 )
+                # Weekly live upperpink (BJ) must equal the weekly historical upperpink (AW),
+                # which is the value verified against TradingView. Column 11 is upperpink
+                # in both row layouts (history AL:AX, live AY:BL).
+                wh, wl = weekly_history_rows[-1], weekly_live_rows[-1]
+                if len(wh) > 11 and len(wl) > 11 and wh[11] != '' and wl[11] != '':
+                    wl[11] = wh[11]
 
         if symbols_data:
             last_row = 1 + len(symbols_data)
