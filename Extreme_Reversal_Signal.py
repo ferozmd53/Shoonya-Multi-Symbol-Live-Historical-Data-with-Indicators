@@ -2231,7 +2231,7 @@ def _history_base(symbol_key, trading_symbol):
 
 
 def refresh_indicator_history(force=False):
-    """Fill INDICATOR_HISTORY with the last N days of indicator values for the typed symbol."""
+    """Show daily and weekly candles + indicators for the symbol typed in INDICATOR_HISTORY!B1."""
     global _history_sig, _history_rows_written
     try:
         ws = excel_name.sheets[Config.HISTORY_SHEET]
@@ -2263,7 +2263,7 @@ def refresh_indicator_history(force=False):
     if exchange != "NSE":
         sig = ("nse", key)
         if sig != _history_sig:
-            _set_history_status(ws, "only NSE symbols have daily indicator history")
+            _set_history_status(ws, "only NSE symbols have daily/weekly indicator history")
             _history_sig = sig
         return
 
@@ -2274,26 +2274,94 @@ def refresh_indicator_history(force=False):
     if sig == _history_sig and not force:
         return
     _history_sig = sig
-    _set_history_status(ws, f"computing {days} days for {key} ...")
+    _set_history_status(ws, f"computing daily + weekly history for {key} ...")
     base, _ = _history_base(key, trading_symbol)
     if base is None or len(base) < 3:
         _set_history_status(ws, f"no candle data for {key}")
         return
+
+    base = base[['datetime', 'open', 'high', 'low', 'close', 'volume']].copy()
+    base['datetime'] = pd.to_datetime(base['datetime'])
+    base = base.dropna(subset=['datetime']).sort_values('datetime').drop_duplicates('datetime').reset_index(drop=True)
     confirmed = base['datetime'].iloc[-1].date() != datetime.now().date()
-    tbl = indicator_history.table(base, days, params, confirmed)
-    values = []
-    for row in tbl.itertuples(index=False):
-        values.append([('' if (isinstance(v, float) and v != v) else (round(v, 2) if isinstance(v, float) else v))
-                       for v in row])
-    cols = len(indicator_history.TABLE_COLUMNS)
-    last_col = get_column_letter(cols)
-    ws.range(f"A{HISTORY_HEADER_ROW}:{last_col}{HISTORY_HEADER_ROW}").value = indicator_history.TABLE_COLUMNS
-    if _history_rows_written > len(values):
-        ws.range(f"A{HISTORY_FIRST_ROW + len(values)}:{last_col}{HISTORY_FIRST_ROW + _history_rows_written}").clear_contents()
-    if values:
-        ws.range(f"A{HISTORY_FIRST_ROW}:{last_col}{HISTORY_FIRST_ROW + len(values) - 1}").value = values
-    _history_rows_written = len(values)
-    _set_history_status(ws, f"OK {datetime.now():%H:%M:%S} | {key} | {len(values)} days (newest first)")
+
+    # Daily indicator table (same calculations and source candles as the live daily engine).
+    daily_tbl = indicator_history.table(base, days, params, confirmed)
+
+    # Weekly diagnostic table uses Monday-labelled OHLCV candles and the weekly ATR start date.
+    weekly_base = indicator_history.to_weekly(base)
+    weekly_params = dict(params)
+    weekly_params['first_bar_date'] = Config.WEEKLY_FIRST_BAR_DATE
+    if Config.WEEKLY_FIRST_BAR_DATE:
+        weekly_base = weekly_base[
+            weekly_base['datetime'] >= pd.Timestamp(Config.WEEKLY_FIRST_BAR_DATE)
+        ].reset_index(drop=True)
+    weekly_tbl = pd.DataFrame(columns=indicator_history.TABLE_COLUMNS)
+    if not weekly_base.empty:
+        latest_week_start = pd.Timestamp(weekly_base['datetime'].iloc[-1]).date()
+        weekly_confirmed = datetime.now().date() > latest_week_start + timedelta(days=4)
+        weekly_tbl = indicator_history.table(
+            weekly_base, min(days, len(weekly_base)), weekly_params, weekly_confirmed
+        )
+
+    def _excel_rows(table):
+        output = []
+        for row in table.itertuples(index=False, name=None):
+            clean = []
+            for value in row:
+                if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+                    clean.append("")
+                elif isinstance(value, (float, np.floating)):
+                    clean.append(round(float(value), 2))
+                elif isinstance(value, (np.bool_, bool)):
+                    clean.append(bool(value))
+                else:
+                    clean.append(value)
+            output.append(clean)
+        return output
+
+    daily_values = _excel_rows(daily_tbl)
+    weekly_values = _excel_rows(weekly_tbl)
+    last_col = "M"
+
+    # INDICATOR_HISTORY is a dedicated diagnostic output area. Clear only A6:M2000;
+    # the symbol, days, and status controls in rows 1-3 remain untouched.
+    ws.range("A6:M2000").clear_contents()
+    ws.range(f"A{HISTORY_HEADER_ROW}:M{HISTORY_HEADER_ROW}").value = indicator_history.TABLE_COLUMNS
+    if daily_values:
+        ws.range(f"A{HISTORY_FIRST_ROW}:M{HISTORY_FIRST_ROW + len(daily_values) - 1}").value = daily_values
+
+    weekly_title_row = HISTORY_FIRST_ROW + len(daily_values) + 1
+    weekly_header_row = weekly_title_row + 1
+    weekly_data_row = weekly_header_row + 1
+    ws.range(f"A{weekly_title_row}").value = (
+        f"WEEKLY INDICATOR HISTORY — {len(weekly_base)} total weekly candles; "
+        f"showing latest {len(weekly_values)}"
+    )
+    ws.range(f"A{weekly_header_row}:M{weekly_header_row}").value = indicator_history.TABLE_COLUMNS
+    if weekly_values:
+        ws.range(f"A{weekly_data_row}:M{weekly_data_row + len(weekly_values) - 1}").value = weekly_values
+
+    _history_rows_written = len(daily_values)
+    daily_atr = daily_values[0][12] if daily_values else "no daily rows"
+    weekly_atr = weekly_values[0][12] if weekly_values else "no weekly rows"
+    daily_range = (
+        f"{base['datetime'].iloc[0]:%d/%m/%Y} to {base['datetime'].iloc[-1]:%d/%m/%Y}"
+    )
+    _set_history_status(
+        ws,
+        f"OK {datetime.now():%H:%M:%S} | {key} | Daily {len(base)} candles "
+        f"({daily_range}); shown {len(daily_values)} | Weekly {len(weekly_base)} candles; "
+        f"shown {len(weekly_values)} | upperpink Daily: {daily_atr}; Weekly: {weekly_atr}"
+    )
+    try:
+        ws.range("A5:M5").api.Font.Bold = True
+        ws.range(f"A{weekly_title_row}:M{weekly_title_row}").api.Font.Bold = True
+        ws.range(f"A{weekly_header_row}:M{weekly_header_row}").api.Font.Bold = True
+        ws.range("A5:M2000").columns.AutoFit()
+        ws.range("A6:A2000").number_format = "dd/mm/yyyy"
+    except Exception:
+        pass
 
 
 def reload_indicators(refetch):
