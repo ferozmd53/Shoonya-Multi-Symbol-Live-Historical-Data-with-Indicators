@@ -23,20 +23,26 @@ TABLE_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume", "BB Upper", "
 
 
 def to_weekly(df):
-    """Aggregate chronological daily OHLCV candles into Monday-labelled weekly candles."""
+    """Aggregate daily OHLCV with the exact Sunday-ending resample used by the reference."""
+    columns = ["datetime", "open", "high", "low", "close", "volume"]
     if df is None or df.empty:
-        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
-    daily = df[["datetime", "open", "high", "low", "close", "volume"]].copy()
+        return pd.DataFrame(columns=columns)
+
+    daily = df[columns].copy()
     daily["datetime"] = pd.to_datetime(daily["datetime"])
-    daily["week"] = daily["datetime"].dt.to_period("W-SUN").dt.start_time
-    grouped = daily.groupby("week", sort=True)
-    weekly = pd.DataFrame({
-        "open": grouped["open"].first(),
-        "high": grouped["high"].max(),
-        "low": grouped["low"].min(),
-        "close": grouped["close"].last(),
-        "volume": grouped["volume"].sum(),
-    })
+    daily = daily.sort_values("datetime").set_index("datetime")
+
+    # Match the reference calculation exactly:
+    # resample('W') = Monday-to-Sunday bins, then shift the label to Monday.
+    logic = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }
+    weekly = daily.resample("W").apply(logic)
+    weekly.index = weekly.index - pd.tseries.frequencies.to_offset("6D")
     weekly.index.name = "datetime"
     return weekly.reset_index()
 
