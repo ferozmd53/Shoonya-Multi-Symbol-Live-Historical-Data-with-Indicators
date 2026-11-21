@@ -210,6 +210,7 @@ import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
 from instrument_master import InstrumentMaster, SUPPORTED_EXCHANGES
+from Weekly import WeeklyDataEngine
 warnings.filterwarnings('ignore')
 
 # ============================================
@@ -344,7 +345,6 @@ import pink_mirror
 import candle_cache
 import indicator_settings
 import indicator_history
-from Weekly import WeeklyDataEngine
 
 # ============================================
 # CONFIGURATION - FULLY CUSTOMIZABLE
