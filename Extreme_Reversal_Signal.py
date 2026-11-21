@@ -627,30 +627,27 @@ def _row_from_snapshot(snap):
     }
 
 
-def _weekly_upperpink(base, as_of=None, live_bar=None, last_bar_confirmed=None):
-    """Calculate weekly upperpink independently from daily candles.
-
-    AW uses historical daily candles (and AS_OF_DATE when selected).
-    BJ overlays today's live OHLCV and leaves the current weekly candle unconfirmed,
-    matching Pine's barstate.isconfirmed step-line behavior.
-    """
+def _weekly_snapshot(base, as_of=None, live_bar=None, last_bar_confirmed=None):
+    """Build a complete weekly OHLCV + indicator snapshot from daily candles."""
     try:
         if base is None or base.empty:
-            return ''
+            return None
+
         daily = base[['datetime', 'open', 'high', 'low', 'close', 'volume']].copy()
         daily['datetime'] = pd.to_datetime(daily['datetime'])
         if as_of is not None:
             daily = daily[daily['datetime'] <= pd.Timestamp(as_of)].copy()
         if daily.empty:
-            return ''
+            return None
 
+        # Overlay the live session's OHLCV on the daily candles before weekly aggregation.
         if live_bar is not None:
             ltp = safe_float(live_bar.get('ltp', 0))
             tick_time = live_bar.get('timestamp')
             today = pd.Timestamp(datetime.now().date())
-            # Never treat a stale prior-session tick as a new candle on a holiday/weekend.
             if ltp <= 0 or tick_time is None or pd.Timestamp(tick_time).date() != today.date():
-                return ''
+                return None
+
             current = _current_bar(live_bar, ltp)
             live_row = {
                 'datetime': today,
@@ -674,29 +671,46 @@ def _weekly_upperpink(base, as_of=None, live_bar=None, last_bar_confirmed=None):
             weekly = weekly[weekly['datetime'] >= pd.Timestamp(Config.WEEKLY_FIRST_BAR_DATE)]
         weekly = weekly.reset_index(drop=True)
         if len(weekly) <= Config.PM_START_BAR:
-            return ''
+            return None
 
         if last_bar_confirmed is None:
             week_start = weekly['datetime'].iloc[-1].date()
             reference_date = pd.Timestamp(as_of).date() if as_of is not None else datetime.now().date()
             last_bar_confirmed = reference_date > week_start + timedelta(days=4)
 
-        value = pink_mirror.step_last(
-            weekly['high'].astype(float).values,
-            weekly['low'].astype(float).values,
-            weekly['close'].astype(float).values,
-            weekly[Config.PM_STEP_SRC].astype(float).values,
-            Config.PM_STEP_WIDTH,
-            Config.PM_ATR_LEN,
-            Config.PM_ATR_HI,
-            Config.PM_START_BAR,
-            last_bar_confirmed,
-        )
-        return _rnd(value)
+        # Weekly calculations must warm up from the weekly start date, not the daily start date.
+        params = indicator_params()
+        params['first_bar_date'] = Config.WEEKLY_FIRST_BAR_DATE
+        return indicator_history.snapshot(weekly, params, last_bar_confirmed)
     except Exception as exc:
-        print(f"⚠️ Weekly upperpink calculation: {exc}")
-        return ''
+        print(f"⚠️ Weekly calculation: {exc}")
+        return None
 
+
+def _weekly_history_row(symbol, base, as_of=None):
+    snap = _weekly_snapshot(base, as_of=as_of)
+    if not snap:
+        return [''] * 13
+    return [
+        symbol, snap['datetime'].strftime('%d/%m/%Y'),
+        snap['open'], snap['high'], snap['low'], snap['close'], snap['volume'],
+        snap['nwe_buy'], snap['nwe_sell'], _rnd(snap['bb_upper']), _rnd(snap['bb_lower']),
+        _rnd(snap['pink']), _rnd(snap['mirror'])
+    ]
+
+
+def _weekly_live_row(symbol, base, live_bar):
+    snap = _weekly_snapshot(base, live_bar=live_bar, last_bar_confirmed=False)
+    if not snap:
+        return [''] * 14
+    tick_time = live_bar.get('timestamp')
+    return [
+        symbol, snap['datetime'].strftime('%d/%m/%Y'), snap['close'],
+        snap['open'], snap['high'], snap['low'], snap['volume'],
+        snap['nwe_buy'], snap['nwe_sell'], _rnd(snap['bb_upper']), _rnd(snap['bb_lower']),
+        _rnd(snap['pink']), _rnd(snap['mirror']),
+        tick_time.strftime('%H:%M:%S') if tick_time else ''
+    ]
 
 def _download_df(symbol):
     """Daily candles (DataFrame) + source text, or (None, reason)."""
@@ -1755,8 +1769,8 @@ def update_excel_bulk():
                     live_rows.append([''] * LIVE_COUNT)
                 if hist_due:
                     hist_rows.append([''] * HIST_COUNT)
-                    weekly_history_rows.append([''])
-                    weekly_live_rows.append([''])
+                    weekly_history_rows.append([''] * 13)
+                    weekly_live_rows.append([''] * 14)
                 continue
 
             try:
@@ -1806,17 +1820,15 @@ def update_excel_bulk():
                     yesterday.get('bb_upper', ''), yesterday.get('bb_lower', ''),
                     yesterday.get('pink', ''), yesterday.get('mirror', '')
                 ])
-                # AW: historical weekly calculation from the daily history only.
-                weekly_history_rows.append([
-                    _weekly_upperpink(hist.get('base') if hist else None,
-                                      as_of=Config.AS_OF_DATE)
-                ])
-                # BJ: independent current-week calculation with today's live OHLCV overlay.
-                weekly_live_rows.append([
-                    _weekly_upperpink(hist.get('base') if hist else None,
-                                      live_bar=data, last_bar_confirmed=False)
-                    if hist and data else ''
-                ])
+                # Full weekly historical block AL:AX and current/live block AY:BL.
+                weekly_history_rows.append(
+                    _weekly_history_row(symbol, hist.get('base') if hist else None,
+                                        as_of=Config.AS_OF_DATE)
+                )
+                weekly_live_rows.append(
+                    _weekly_live_row(symbol, hist.get('base'), data)
+                    if hist and data else [''] * 14
+                )
 
         if symbols_data:
             last_row = 1 + len(symbols_data)
@@ -1826,9 +1838,9 @@ def update_excel_bulk():
                 last_indicator_excel_update = now
             if hist_due and hist_rows:
                 ws.range(f"{Config.HIST_START}2:{HIST_END}{last_row}").value = hist_rows
-                # Fixed user workbook positions; write only these two value columns.
-                ws.range(f"AW2:AW{last_row}").value = weekly_history_rows
-                ws.range(f"BJ2:BJ{last_row}").value = weekly_live_rows
+                # Fixed user workbook positions; never insert, delete, or shift columns.
+                ws.range(f"AL2:AX{last_row}").value = weekly_history_rows
+                ws.range(f"AY2:BL{last_row}").value = weekly_live_rows
                 last_hist_excel_update = now
 
     except Exception as exc:
@@ -1935,12 +1947,29 @@ def migrate_spacer_columns():
     print("🔒 Workbook column migration disabled; existing column positions are preserved.")
     return True
 def setup_excel_headers():
-    """Do not rewrite headers or clear cells: the user's A:BL layout is authoritative."""
+    """Fill missing weekly header cells only; preserve all existing values and positions."""
     try:
         ws = excel_name.sheets['symbols']
         if str(ws.range("A1").value or "").strip().upper() != "SYMBOL":
             print("⚠️ symbols!A1 is not SYMBOL; leaving every existing header untouched.")
-        print("🔒 Existing symbols-sheet headers and column positions preserved (no migration).")
+        weekly_headers = {
+            "AL": "SYMBOL", "AM": "Week (Mon)", "AN": "Open", "AO": "High",
+            "AP": "Low", "AQ": "Close", "AR": "Volume", "AS": "NADARYA BUY",
+            "AT": "NADARYA SELL", "AU": "BB Upper", "AV": "BB Lower",
+            "AW": "upperpink", "AX": "mirrorUpperBand",
+            "AY": "SYMBOLS", "AZ": "Week (Mon)", "BA": "LTP", "BB": "Open",
+            "BC": "High", "BD": "Low", "BE": "Volume", "BF": "NADARYA BUY",
+            "BG": "NADARYA SELL", "BH": "BB Upper", "BI": "BB Lower",
+            "BJ": "upperpink", "BK": "mirrorUpperBand", "BL": "Last Update"
+        }
+        filled = 0
+        for col, header in weekly_headers.items():
+            cell = ws.range(f"{col}1")
+            if cell.value is None or str(cell.value).strip() == "":
+                cell.value = header
+                filled += 1
+        print(f"🟣 Weekly headers AL:AX / AY:BL checked; filled {filled} blank cells only.")
+        print("🔒 Existing headers, data, and column positions preserved (no migration).")
         return True
     except Exception as exc:
         print(f"❌ Could not verify symbols sheet: {exc}")
@@ -2252,7 +2281,9 @@ def start_excel_loop():
     print(f"   📊 LIVE DATA (Columns {Config.LIVE_START}-{LIVE_END}) - {LIVE_COUNT} columns")
     print(f"   📋 ORDERS (Columns {Config.ORDER_START}-{ORDER_END}) - {ORDER_COUNT} columns")
     print(f"   📜 HISTORICAL DATA (Columns {Config.HIST_START}-{HIST_END}) - {HIST_COUNT} columns")
-    print(f"   ⚡ NADARYA BUY / NADARYA SELL in live + historical columns\n")
+    print("   🟣 WEEKLY HISTORICAL (Columns AL:AX) - 13 columns")
+    print("   🟣 WEEKLY LIVE (Columns AY:BL) - 14 columns")
+    print("   ⚡ NADARYA BUY / NADARYA SELL in live + historical + weekly columns\n")
     
     last_save = time.time()
     last_status = time.time()
