@@ -147,7 +147,14 @@ def get_daily(db_path, fetch_fn, exchange, symbol, window_start, today=None,
             con.commit()
             return [to_raw(r) for r in rows], f"full download {len(rows)} bars ({reason})"
 
+        # Validate the actual first cached candle as well as the metadata.
+        # Older versions marked the requested start date as covered even when
+        # Shoonya truncated the long response, leaving a silently short cache.
+        cache_starts_too_late = bool(
+            cached and cached[0][0] > window_start + timedelta(days=7)
+        )
         if (meta is None or not cached or meta[0] > window_start
+                or cache_starts_too_late
                 or (today - meta[1]).days >= full_refresh_days):
             reason = ("first run" if meta is None or not cached else
                       "longer history needed" if meta[0] > window_start else "monthly refresh")
