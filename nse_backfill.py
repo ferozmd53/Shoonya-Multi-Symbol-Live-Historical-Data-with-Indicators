@@ -323,9 +323,9 @@ def get_extra_history(symbol, shoonya_frame, db_path, weekly_start_date,
         )
         while have_weeks < required_weeks and earliest_known > start_limit:
             missing_weeks = required_weeks - have_weeks
-            # A modest buffer covers exchange holidays without fetching many
-            # unnecessary years. Requests are split into <=180-day NSE chunks.
-            calendar_days = min(420, max(210, (missing_weeks + 8) * 7))
+            # Add only a three-week calendar buffer for holidays/partial weeks.
+            # Requests are split into <=180-day NSE chunks.
+            calendar_days = min(420, max(42, (missing_weeks + 3) * 7))
             end_date = earliest_known - timedelta(days=1)
             start_date = max(start_limit, end_date - timedelta(days=calendar_days - 1))
             if start_date > end_date:
