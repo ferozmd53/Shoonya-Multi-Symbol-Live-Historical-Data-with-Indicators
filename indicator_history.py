@@ -21,6 +21,25 @@ TABLE_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume", "BB Upper", "
                  "NADARYA BUY", "NADARYA SELL", "upperpink", "mirrorUpperBand"]
 
 
+def to_weekly(df):
+    """Aggregate chronological daily OHLCV candles into Monday-labelled weekly candles."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+    daily = df[["datetime", "open", "high", "low", "close", "volume"]].copy()
+    daily["datetime"] = pd.to_datetime(daily["datetime"])
+    daily["week"] = daily["datetime"].dt.to_period("W-SUN").dt.start_time
+    grouped = daily.groupby("week", sort=True)
+    weekly = pd.DataFrame({
+        "open": grouped["open"].first(),
+        "high": grouped["high"].max(),
+        "low": grouped["low"].min(),
+        "close": grouped["close"].last(),
+        "volume": grouped["volume"].sum(),
+    })
+    weekly.index.name = "datetime"
+    return weekly.reset_index()
+
+
 def _f(df, col):
     return df[col].astype(float).values
 
