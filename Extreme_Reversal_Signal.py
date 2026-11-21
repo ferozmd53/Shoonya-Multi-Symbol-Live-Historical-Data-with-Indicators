@@ -273,6 +273,10 @@ pending_order_updates = []
 order_update_lock = threading.Lock()
 order_result_queue = queue.Queue()
 order_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="ShoonyaOrder")
+# NSE history backfill must never block Shoonya live feed or order processing.
+nse_backfill_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="NSEBackfill")
+nse_backfill_pending = set()
+nse_backfill_lock = threading.Lock()
 order_inflight = set()
 order_inflight_lock = threading.Lock()
 order_reconcile_future = None
@@ -915,22 +919,8 @@ def _download_df(symbol):
             df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.sort_values('datetime').dropna().reset_index(drop=True)
 
-    # Add only older NSE EQ candles required for the weekly upperpink ATR warm-up.
-    # Shoonya remains the source for all recent candles; no indicator formula changes.
-    if Config.NSE_BACKFILL_ENABLED:
-        try:
-            extra = nse_backfill.get_extra_history(
-                symbol, df, Config.NSE_BACKFILL_DB_PATH,
-                Config.WEEKLY_FIRST_BAR_DATE, Config.PM_ATR_LEN,
-                Config.PM_ATR_HI, Config.PM_START_BAR
-            )
-            if extra is not None and not extra.empty:
-                df = pd.concat([extra, df], ignore_index=True)
-                df = df.sort_values('datetime').drop_duplicates('datetime', keep='last')
-                df = df.reset_index(drop=True)
-                source = f"{source} + NSE older history ({len(extra)} candles)"
-        except Exception as exc:
-            print(f"⚠️ NSE older-history backfill skipped for {symbol}: {exc}")
+    # NSE warm-up history is fetched after live trading starts, in background workers.
+    # Do not hold up startup or WebSocket subscription for historical backfill.
 
     return df, source
 
@@ -1077,6 +1067,55 @@ def _preload_live(d, hist_data):
     d['prev_bb_lower'] = y['prev_bb_lower']
     d['prev_sma_stoch'] = y['prev_sma_stoch']
     d.pop('_nwe_key', None)
+
+
+def _background_nse_backfill(symbol_key, trading_symbol, hist_data):
+    """Fetch only missing NSE candles off the trading thread, then refresh indicators."""
+    global _history_sig
+    pending_key = str(symbol_key).strip().upper()
+    try:
+        if not Config.NSE_BACKFILL_ENABLED or not hist_data or hist_data.get('base') is None:
+            return
+        base = hist_data['base'].copy()
+        extra = nse_backfill.get_extra_history(
+            trading_symbol, base, Config.NSE_BACKFILL_DB_PATH,
+            Config.WEEKLY_FIRST_BAR_DATE, Config.PM_ATR_LEN,
+            Config.PM_ATR_HI, Config.PM_START_BAR
+        )
+        if extra is None or extra.empty:
+            print(f"[NSE BACKFILL] {trading_symbol}: no additional cached/downloaded candles")
+            return
+        combined = pd.concat([extra, base], ignore_index=True)
+        combined = combined.sort_values('datetime').drop_duplicates('datetime', keep='last')
+        combined = combined.reset_index(drop=True)
+        source = f"{hist_data.get('source', 'Shoonya')} + NSE older history ({len(extra)} candles)"
+        updated = _build_hist(combined, trading_symbol, source)
+        if updated:
+            historical_data_cache[symbol_key] = updated
+            token_key = symbol_tokens.get(symbol_key)
+            live = live_data.get(token_key) if token_key else None
+            if live is not None:
+                _preload_live(live, updated)
+            _history_sig = None
+            print(f"[NSE BACKFILL] {trading_symbol}: background history ready; weekly indicators refreshed")
+    except Exception as exc:
+        print(f"[NSE BACKFILL] {trading_symbol}: background task failed safely: {exc}")
+    finally:
+        with nse_backfill_lock:
+            nse_backfill_pending.discard(pending_key)
+
+
+def _schedule_nse_backfill(symbol_key, trading_symbol, hist_data):
+    """Queue one background NSE warm-up task per symbol; return immediately."""
+    if not Config.NSE_BACKFILL_ENABLED or not hist_data:
+        return
+    pending_key = str(symbol_key).strip().upper()
+    with nse_backfill_lock:
+        if pending_key in nse_backfill_pending:
+            return
+        nse_backfill_pending.add(pending_key)
+    nse_backfill_executor.submit(_background_nse_backfill, symbol_key, trading_symbol, hist_data)
+
 
 def _current_bar(d, ltp):
     """Today's forming daily bar using accumulated ticks and exchange day high/low."""
@@ -2713,6 +2752,8 @@ def main(auth_code_provider=None):
             if hist_data:
                 historical_data_cache[symbol] = hist_data
                 _preload_live(live_data[tk], hist_data)
+                # Queue NSE's missing older weekly candles without delaying symbol startup.
+                _schedule_nse_backfill(symbol, trading_symbol, hist_data)
                 print(f"   [{i:2}/{len(symbols)}] ✓ {symbol}  [{hist_data.get('source', '')}]")
             else:
                 status = "live token loaded; historical indicators are NSE-only" if exchange != "NSE" else "historical data unavailable"
@@ -2723,8 +2764,8 @@ def main(auth_code_provider=None):
     
     print(f"\n✅ Initialized {len(symbol_tokens)} symbols")
     _elapsed = time.time() - _t_hist
-    print(f"⏱ History + indicators loaded in {_elapsed:.1f}s "
-          f"({_elapsed / max(len(symbols), 1):.2f}s per symbol). Nothing is written to Excel until this finishes.")
+    print(f"⏱ Shoonya history + initial indicators loaded in {_elapsed:.1f}s "
+          f"({_elapsed / max(len(symbols), 1):.2f}s per symbol). NSE 400-week warm-up continues in background.")
     
     if len(symbol_tokens) == 0:
         print("❌ No symbols!")
